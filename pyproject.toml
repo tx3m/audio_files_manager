@@ -1,0 +1,8 @@
+[project]
+name = "audiofilemanager"
+version = "0.1.0"
+description = "Audio files recording and management"
+requires-python = ">=3.11"
+dependencies = [
+    "setuptools==80.9.0",
+]

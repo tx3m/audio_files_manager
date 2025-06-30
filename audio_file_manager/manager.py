@@ -1,0 +1,146 @@
+import os
+import json
+import time
+import wave
+import shutil
+from pathlib import Path
+from datetime import datetime
+import alsaaudio
+
+
+class AudioFileManager:
+    def __init__(self, storage_dir='/mnt/data/audio_manager', metadata_file='metadata.json', num_buttons=16):
+        self.storage_dir = Path(storage_dir)
+        self.metadata_file = Path(metadata_file)
+        self.temp_dir = Path("/tmp/audio_staging")
+        self.num_buttons = num_buttons
+
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata = self._load_metadata()
+
+    def _load_metadata(self):
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def _save_metadata(self):
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=4)
+
+    def record_audio_to_temp(self, button_id, duration, message_type, channels=1, rate=16000,
+                             format=alsaaudio.PCM_FORMAT_S16_LE):
+        button_id = str(button_id)
+        keyword = message_type.lower().replace(" ", "_")
+        filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
+        temp_path = self.temp_dir / filename
+        timestamp = datetime.utcnow().isoformat()
+
+        inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL)
+        inp.setchannels(channels)
+        inp.setrate(rate)
+        inp.setformat(format)
+        inp.setperiodsize(1024)
+
+        frames = []
+        num_frames = int(rate / 1024 * duration)
+        for _ in range(num_frames):
+            length, data = inp.read()
+            if length:
+                frames.append(data)
+
+        with wave.open(str(temp_path), 'wb') as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(b''.join(frames))
+
+        return {
+            "button_id": button_id,
+            "message_type": message_type,
+            "duration": duration,
+            "temp_path": str(temp_path),
+            "timestamp": timestamp
+        }
+
+    def finalize_recording(self, temp_path_info):
+        button_id = str(temp_path_info["button_id"])
+        if self.metadata.get(button_id, {}).get('read_only'):
+            print(f"Recording blocked: Button {button_id} is read-only.")
+            return
+
+        final_path = self.storage_dir / Path(temp_path_info["temp_path"]).name
+        shutil.move(temp_path_info["temp_path"], final_path)
+
+        self.metadata[button_id] = {
+            "name": final_path.name,
+            "duration": temp_path_info["duration"],
+            "path": str(final_path),
+            "timestamp": temp_path_info["timestamp"],
+            "message_type": temp_path_info["message_type"],
+            "audio_format": "wav",
+            "read_only": False,
+            "is_default": False
+        }
+        self._save_metadata()
+
+    def discard_recording(self, button_id):
+        button_id = str(button_id)
+        for f in self.temp_dir.glob(f"{button_id}_*.wav"):
+            f.unlink()
+
+    def set_read_only(self, button_id, read_only=True):
+        button_id = str(button_id)
+        if button_id not in self.metadata:
+            return
+        self.metadata[button_id]['read_only'] = read_only
+        self._save_metadata()
+
+    def get_recording_info(self, button_id):
+        return self.metadata.get(str(button_id))
+
+    def list_all_recordings(self):
+        return self.metadata
+
+    def assign_default(self, button_id, file_path):
+        button_id = str(button_id)
+        if not Path(file_path).exists():
+            return
+
+        default_name = f"default_{button_id}.wav"
+        default_path = self.storage_dir / default_name
+        shutil.copy(file_path, default_path)
+
+        self.metadata[button_id] = {
+            "name": default_name,
+            "duration": None,
+            "path": str(default_path),
+            "timestamp": datetime.utcnow().isoformat(),
+            "message_type": "default",
+            "audio_format": "wav",
+            "read_only": True,
+            "is_default": True
+        }
+        self._save_metadata()
+
+    def restore_default(self, button_id):
+        button_id = str(button_id)
+        default_path = self.storage_dir / f"default_{button_id}.wav"
+        if not default_path.exists():
+            return
+
+        restored_path = self.storage_dir / f"{button_id}_restored_{int(time.time())}.wav"
+        shutil.copy(default_path, restored_path)
+
+        self.metadata[button_id] = {
+            "name": restored_path.name,
+            "duration": None,
+            "path": str(restored_path),
+            "timestamp": datetime.utcnow().isoformat(),
+            "message_type": "restored_default",
+            "audio_format": "wav",
+            "read_only": False,
+            "is_default": False
+        }
+        self._save_metadata()

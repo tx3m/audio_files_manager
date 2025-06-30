@@ -1,0 +1,11 @@
+image: python:3.10
+
+pipelines:
+  default:
+    - step:
+        name: Run Unit Tests
+        caches:
+          - pip
+        script:
+          - pip install .
+          - python -m unittest discover -s tests -p "test_*.py"
