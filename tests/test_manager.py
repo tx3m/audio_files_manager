@@ -3,12 +3,17 @@ import tempfile
 import shutil
 import os
 from pathlib import Path
-from audio_file_manager import AudioFileManager
 from datetime import datetime
 
 DUMMY_AUDIO = b'\x00\x01' * 8000
 
+try:
+    from audio_file_manager import AudioFileManager
+    ALSA_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    ALSA_AVAILABLE = False
 
+@unittest.skipUnless(ALSA_AVAILABLE, "Skipping tests because alsaaudio is not available.")
 class TestAudioFileManager(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
