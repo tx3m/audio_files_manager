@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import platform
+from threading import Event
 
 try:
     if platform.system() == "Linux":
@@ -39,7 +40,29 @@ class AudioFileManager:
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=4)
 
-    def record_audio_to_temp(self, button_id, duration, message_type, channels=1, rate=41000):
+    def record_audio_to_temp(self, button_id, message_type, stop_event: Event, channels=1, rate=44100):
+        """
+            Records audio from the system microphone to a temporary WAV file until the provided stop_event is triggered.
+
+            The recording is platform-aware:
+            - On Linux: Uses ALSA via pyalsaaudio
+            - On Windows/macOS: Uses sounddevice
+
+            Audio data is streamed in real time, accumulated in memory, and written to a WAV file once stopped.
+            The duration is calculated based on the recorded byte length.
+
+        :param button_id: (str or int) ID representing the logical button associated with this recording.
+        :param message_type: Semantic label or category for the audio (away, custom, etc.)
+        :param stop_event: A live threading event object. When set, recording stops.
+        :param channels: Number of channels to record. Default is 1 (mono).
+        :param rate: Sample rate in Hz. Default is 44100.
+        :return: dict: A metadata dictionary with the following keys:
+            - 'button_id': Button ID used
+            - 'message_type': Provided label for the message
+            - 'duration': Length of the recording in seconds (float)
+            - 'temp_path': Absolute path to the temporary WAV file
+            - 'timestamp': UTC timestamp of the recording start
+        """
         button_id = str(button_id)
         keyword = message_type.lower().replace(" ", "_")
         filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
@@ -54,20 +77,40 @@ class AudioFileManager:
             inp.setperiodsize(1024)
 
             frames = []
-            num_frames = int(rate / 1024 * duration)
-            for _ in range(num_frames):
+            while not stop_event.is_set():
                 length, data = inp.read()
                 if length:
                     frames.append(data)
             pcm_bytes = b''.join(frames)
 
+            duration = len(pcm_bytes) / (rate * channels * 2)
+
         elif AUDIO_BACKEND == "sounddevice":
-            audio = sd.rec(int(duration * rate), samplerate=rate, channels=channels, dtype='int16')
-            sd.wait()
-            pcm_bytes = audio.tobytes()
+            import queue
+
+            q = queue.Queue()
+
+            def callback(indata, frames, time, status):
+                if stop_event.is_set():
+                    raise sd.CallbackStop()
+                q.put(indata.copy())
+
+            audio_chunks = []
+
+            with sd.InputStream(callback=callback, channels=channels, samplerate=rate, dtype='int16'):
+                while not stop_event.is_set():
+                    try:
+                        data = q.get(timeout=0.1)
+                        audio_chunks.append(data)
+                    except queue.Empty:
+                        continue
+
+            all_audio = np.concatenate(audio_chunks)
+            pcm_bytes = all_audio.tobytes()
+            duration = len(pcm_bytes) / (rate * channels * 2)
 
         else:
-            raise NotImplementedError("No supported audio backend available on this platform!")
+            raise NotImplementedError("No supported audio backend available on this platform.")
 
         with wave.open(str(temp_path), 'wb') as wf:
             wf.setnchannels(channels)
@@ -78,7 +121,7 @@ class AudioFileManager:
         return {
             "button_id": button_id,
             "message_type": message_type,
-            "duration": duration,
+            "duration": round(duration, 2),
             "temp_path": str(temp_path),
             "timestamp": timestamp
         }
