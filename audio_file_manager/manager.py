@@ -1,11 +1,21 @@
-import os
 import json
 import time
 import wave
 import shutil
 from pathlib import Path
 from datetime import datetime
-import alsaaudio
+import platform
+
+try:
+    if platform.system() == "Linux":
+        import alsaaudio
+        AUDIO_BACKEND = "alsaaudio"
+    else:
+        import sounddevice as sd
+        import numpy as np
+        AUDIO_BACKEND = "sounddevice"
+except ImportError:
+    AUDIO_BACKEND = None
 
 
 class AudioFileManager:
@@ -29,32 +39,41 @@ class AudioFileManager:
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=4)
 
-    def record_audio_to_temp(self, button_id, duration, message_type, channels=1, rate=16000,
-                             format=alsaaudio.PCM_FORMAT_S16_LE):
+    def record_audio_to_temp(self, button_id, duration, message_type, channels=1, rate=41000):
         button_id = str(button_id)
         keyword = message_type.lower().replace(" ", "_")
         filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
         temp_path = self.temp_dir / filename
         timestamp = datetime.utcnow().isoformat()
 
-        inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL)
-        inp.setchannels(channels)
-        inp.setrate(rate)
-        inp.setformat(format)
-        inp.setperiodsize(1024)
+        if AUDIO_BACKEND == "alsaaudio":
+            inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL)
+            inp.setchannels(channels)
+            inp.setrate(rate)
+            inp.setformat(alsaaudio.PCM_FORMAT_S16_LE)
+            inp.setperiodsize(1024)
 
-        frames = []
-        num_frames = int(rate / 1024 * duration)
-        for _ in range(num_frames):
-            length, data = inp.read()
-            if length:
-                frames.append(data)
+            frames = []
+            num_frames = int(rate / 1024 * duration)
+            for _ in range(num_frames):
+                length, data = inp.read()
+                if length:
+                    frames.append(data)
+            pcm_bytes = b''.join(frames)
+
+        elif AUDIO_BACKEND == "sounddevice":
+            audio = sd.rec(int(duration * rate), samplerate=rate, channels=channels, dtype='int16')
+            sd.wait()
+            pcm_bytes = audio.tobytes()
+
+        else:
+            raise NotImplementedError("No supported audio backend available on this platform!")
 
         with wave.open(str(temp_path), 'wb') as wf:
             wf.setnchannels(channels)
             wf.setsampwidth(2)
             wf.setframerate(rate)
-            wf.writeframes(b''.join(frames))
+            wf.writeframes(pcm_bytes)
 
         return {
             "button_id": button_id,
