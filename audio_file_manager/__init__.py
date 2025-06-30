@@ -1,1 +1,1 @@
-from manager import AudioFileManager
+from .manager import AudioFileManager
