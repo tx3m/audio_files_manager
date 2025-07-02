@@ -8,6 +8,7 @@ from datetime import datetime
 import platform
 import tempfile
 from threading import Event
+from typing import Any, Dict, Optional, Union
 
 try:
     if platform.system() == "Linux":
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class AudioFileManager:
-    def __init__(self, storage_dir: str = None, metadata_file: str = None, num_buttons: int = 16):
+    def __init__(self, storage_dir: Optional[Union[str, Path]] = None, metadata_file: Optional[Union[str, Path]] = None, num_buttons: int = 16):
         if storage_dir is None:
             base_dir = Path.home() / ".audio_files_manager"
             storage_dir = base_dir / "storage"
@@ -38,10 +39,10 @@ class AudioFileManager:
         self.num_buttons = num_buttons
 
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata = self._load_metadata()
+        self.metadata: Dict[str, Dict[str, Any]] = self._load_metadata()
         logger.info(f"AudioFileManager initialized. Storage: {self.storage_dir}")
 
-    def _load_metadata(self):
+    def _load_metadata(self) -> Dict[str, Dict[str, Any]]:
         if self.metadata_file.exists():
             logger.debug(f"Loading metadata from {self.metadata_file}")
             with open(self.metadata_file, 'r') as f:
@@ -53,7 +54,7 @@ class AudioFileManager:
             logger.debug(f"Saving metadata to {self.metadata_file}")
             json.dump(self.metadata, f, indent=4)
 
-    def record_audio_to_temp(self, button_id, message_type, stop_event: Event, channels=1, rate=44100):
+    def record_audio_to_temp(self, button_id: Union[str, int], message_type: str, stop_event: Event, channels: int = 1, rate: int = 44100) -> Dict[str, Any]:
         """
             Records audio from the system microphone to a temporary WAV file until the provided stop_event is triggered.
 
@@ -81,6 +82,9 @@ class AudioFileManager:
         filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
         temp_path = self.temp_dir / filename
         timestamp = datetime.utcnow().isoformat()
+        pcm_bytes = b''
+        # For S16_LE format, each sample is 2 bytes
+        sample_width_bytes = 2
 
         if AUDIO_BACKEND == "alsaaudio":
             inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL)
@@ -95,8 +99,6 @@ class AudioFileManager:
                 if length:
                     frames.append(data)
             pcm_bytes = b''.join(frames)
-
-            duration = len(pcm_bytes) / (rate * channels * 2)
 
         elif AUDIO_BACKEND == "sounddevice":
             import queue
@@ -122,12 +124,13 @@ class AudioFileManager:
                 all_audio = np.concatenate(audio_chunks)
                 pcm_bytes = all_audio.tobytes()
             else:
+                # If no audio was captured, pcm_bytes remains empty
                 pcm_bytes = b''
-            duration = len(pcm_bytes) / (rate * channels * 2)
 
         else:
             raise NotImplementedError("No supported audio backend available on this platform.")
 
+        duration = len(pcm_bytes) / (rate * channels * sample_width_bytes)
         with wave.open(str(temp_path), 'wb') as wf:
             wf.setnchannels(channels)
             wf.setsampwidth(2)
@@ -142,7 +145,45 @@ class AudioFileManager:
             "timestamp": timestamp
         }
 
-    def finalize_recording(self, temp_path_info):
+    def play_audio(self, file_path: Union[str, Path]) -> None:
+        """
+        Plays the audio from the given WAV file.
+
+        This functionality is only supported on platforms using the 'sounddevice' backend
+        (e.g., Windows and macOS).
+
+        :param file_path: The absolute path to the WAV file to be played.
+        """
+        if AUDIO_BACKEND != "sounddevice":
+            logger.warning("Playback is only supported with the 'sounddevice' backend.")
+            raise NotImplementedError("Playback not supported on this audio backend.")
+
+        import sounddevice as sd
+        import numpy as np
+
+        path = Path(file_path)
+        if not path.exists():
+            logger.error(f"Cannot play audio: file not found at {path}")
+            return
+
+        try:
+            with wave.open(str(path), 'rb') as wf:
+                samplerate = wf.getframerate()
+                n_channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                n_frames = wf.getnframes()
+                audio_bytes = wf.readframes(n_frames)
+
+            # The recorder uses 16-bit audio, so we expect that for playback.
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+
+            logger.info(f"Playing audio from {path}...")
+            sd.play(audio_array, samplerate=samplerate, blocking=True)
+            logger.info("Playback finished.")
+        except Exception as e:
+            logger.error(f"Failed to play audio file {path}: {e}")
+
+    def finalize_recording(self, temp_path_info: Dict[str, Any]) -> None:
         button_id = str(temp_path_info["button_id"])
         if self.metadata.get(button_id, {}).get('read_only'):
             logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
@@ -164,29 +205,29 @@ class AudioFileManager:
         }
         self._save_metadata()
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Removes the temporary directory and all its contents."""
         self._temp_dir_obj.cleanup()
 
-    def discard_recording(self, button_id):
+    def discard_recording(self, button_id: Union[str, int]) -> None:
         button_id = str(button_id)
         for f in self.temp_dir.glob(f"{button_id}_*.wav"):
             f.unlink()
 
-    def set_read_only(self, button_id, read_only=True):
+    def set_read_only(self, button_id: Union[str, int], read_only: bool = True) -> None:
         button_id = str(button_id)
         if button_id not in self.metadata:
             return
         self.metadata[button_id]['read_only'] = read_only
         self._save_metadata()
 
-    def get_recording_info(self, button_id):
+    def get_recording_info(self, button_id: Union[str, int]) -> Optional[Dict[str, Any]]:
         return self.metadata.get(str(button_id))
 
-    def list_all_recordings(self):
+    def list_all_recordings(self) -> Dict[str, Dict[str, Any]]:
         return self.metadata
 
-    def assign_default(self, button_id, file_path):
+    def assign_default(self, button_id: Union[str, int], file_path: Union[str, Path]) -> None:
         button_id = str(button_id)
         if not Path(file_path).exists():
             logger.error(f"Cannot assign default: source file not found at {file_path}")
@@ -215,7 +256,7 @@ class AudioFileManager:
         }
         self._save_metadata()
 
-    def restore_default(self, button_id):
+    def restore_default(self, button_id: Union[str, int]) -> None:
         button_id = str(button_id)
         default_path = self.storage_dir / f"default_{button_id}.wav"
         if not default_path.exists():
@@ -225,9 +266,17 @@ class AudioFileManager:
         restored_path = self.storage_dir / f"{button_id}_restored_{int(time.time())}.wav"
         shutil.copy(default_path, restored_path)
 
+        duration = None
+        try:
+            with wave.open(str(restored_path), 'rb') as wf:
+                duration = round(wf.getnframes() / float(wf.getframerate()), 2)
+        except wave.Error:
+            logger.warning(f"Could not read duration from restored file {restored_path}. Duration set to None.")
+
+
         self.metadata[button_id] = {
             "name": restored_path.name,
-            "duration": None,
+            "duration": duration,
             "path": str(restored_path),
             "timestamp": datetime.utcnow().isoformat(),
             "message_type": "restored_default",
