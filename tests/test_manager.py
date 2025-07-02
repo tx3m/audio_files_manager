@@ -3,6 +3,7 @@ import tempfile
 import shutil
 import os
 import time
+import logging
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -67,7 +68,8 @@ class TestAudioFileManager(unittest.TestCase):
             "audio_format": "wav"
         }
         self.manager._save_metadata()
-        temp = self.manager.temp_dir / "btn2_temp.wav"
+        # Create a temp file that follows the manager's naming convention
+        temp = self.manager.temp_dir / f"btn2_test_{int(time.time())}.wav"
         temp.write_bytes(b"temp")
         self.manager.discard_recording('btn2')
         self.assertTrue(confirmed_path.exists())
@@ -95,3 +97,28 @@ class TestAudioFileManager(unittest.TestCase):
         info = self.manager.get_recording_info('btn5')
         self.assertEqual(info['message_type'], "greeting")
         self.assertIn('btn5', self.manager.list_all_recordings())
+
+    def test_finalize_blocked_for_readonly_logs_warning(self):
+        button_id = 'btn6'
+        self.manager.metadata[button_id] = {"read_only": True}
+        self.manager._save_metadata()
+
+        dummy_info = {
+            "button_id": button_id,
+            "temp_path": str(self.manager.temp_dir / "dummy.wav")
+        }
+        Path(dummy_info["temp_path"]).touch()
+
+        with self.assertLogs('audio_file_manager.manager', level='WARNING') as cm:
+            self.manager.finalize_recording(dummy_info)
+            self.assertIn(f"Finalizing recording blocked: Button {button_id} is read-only.", cm.output[0])
+
+        # Ensure the temp file was not moved and metadata was not updated
+        self.assertTrue(Path(dummy_info["temp_path"]).exists())
+        self.assertTrue(self.manager.metadata[button_id]['read_only']) # check it wasn't overwritten
+
+    def test_cleanup_removes_temp_dir(self):
+        temp_dir_path = self.manager.temp_dir
+        self.assertTrue(temp_dir_path.exists())
+        self.manager.cleanup()
+        self.assertFalse(temp_dir_path.exists())

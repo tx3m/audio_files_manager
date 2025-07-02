@@ -3,6 +3,7 @@ import tempfile
 import shutil
 import os
 from pathlib import Path
+import logging
 from datetime import datetime
 from audio_file_manager import AudioFileManager
 
@@ -46,6 +47,7 @@ class TestAudioFileManagerMetadataOnly(unittest.TestCase):
         self.assertNotEqual(original_path, restored_path, "Restoring should create a new file with a new path.")
         self.assertIn('restored', restored_meta['name'])
         self.assertFalse(restored_meta['read_only'])
+        self.assertIsNone(restored_meta['duration'], "Duration should be None for restored files by default.")
         self.assertTrue(restored_path.exists())
 
     def test_set_read_only_flag(self):
@@ -80,3 +82,29 @@ class TestAudioFileManagerMetadataOnly(unittest.TestCase):
         self.manager.discard_recording(button_id)
         self.assertTrue(final_path.exists())
         self.assertFalse(temp.exists())
+
+    def test_assign_default_with_missing_source_logs_error(self):
+        button_id = 'btn60'
+        missing_path = Path(self.test_dir) / "non_existent.wav"
+
+        with self.assertLogs('audio_file_manager.manager', level='ERROR') as cm:
+            self.manager.assign_default(button_id, missing_path)
+            self.assertIn(f"Cannot assign default: source file not found at {missing_path}", cm.output[0])
+
+        self.assertNotIn(button_id, self.manager.metadata)
+
+    def test_restore_default_with_no_default_logs_warning(self):
+        button_id = 'btn70'
+        # Ensure no default exists for this button
+        self.assertNotIn(button_id, self.manager.metadata)
+
+        with self.assertLogs('audio_file_manager.manager', level='WARNING') as cm:
+            self.manager.restore_default(button_id)
+            self.assertIn(f"Cannot restore default for '{button_id}': default file not found.", cm.output[0])
+
+    def test_set_read_only_on_nonexistent_button(self):
+        button_id = 'btn80'
+        self.assertNotIn(button_id, self.manager.metadata)
+        # This should execute without error and without changing metadata
+        self.manager.set_read_only(button_id, True)
+        self.assertNotIn(button_id, self.manager.metadata)
