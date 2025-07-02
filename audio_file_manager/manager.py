@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import platform
+import tempfile
 from threading import Event
 
 try:
@@ -20,14 +21,14 @@ except ImportError:
 
 
 class AudioFileManager:
-    def __init__(self, storage_dir='/mnt/data/audio_manager', metadata_file='metadata.json', num_buttons=16):
+    def __init__(self, storage_dir: str = '/mnt/data/audio_manager', metadata_file: str='metadata.json', num_buttons: int = 16):
         self.storage_dir = Path(storage_dir)
         self.metadata_file = Path(metadata_file)
-        self.temp_dir = Path("/tmp/audio_staging")
+        self._temp_dir_obj = tempfile.TemporaryDirectory(prefix="audio_staging_")
+        self.temp_dir = Path(self._temp_dir_obj.name)
         self.num_buttons = num_buttons
 
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.metadata = self._load_metadata()
 
     def _load_metadata(self):
@@ -105,8 +106,11 @@ class AudioFileManager:
                     except queue.Empty:
                         continue
 
-            all_audio = np.concatenate(audio_chunks)
-            pcm_bytes = all_audio.tobytes()
+            if audio_chunks:
+                all_audio = np.concatenate(audio_chunks)
+                pcm_bytes = all_audio.tobytes()
+            else:
+                pcm_bytes = b''
             duration = len(pcm_bytes) / (rate * channels * 2)
 
         else:
@@ -147,6 +151,10 @@ class AudioFileManager:
         }
         self._save_metadata()
 
+    def cleanup(self):
+        """Removes the temporary directory and all its contents."""
+        self._temp_dir_obj.cleanup()
+
     def discard_recording(self, button_id):
         button_id = str(button_id)
         for f in self.temp_dir.glob(f"{button_id}_*.wav"):
@@ -174,9 +182,17 @@ class AudioFileManager:
         default_path = self.storage_dir / default_name
         shutil.copy(file_path, default_path)
 
+        duration = None
+        try:
+            with wave.open(str(default_path), 'rb') as wf:
+                duration = round(wf.getnframes() / float(wf.getframerate()), 2)
+        except wave.Error:
+            print(f"Error reading WAV file {default_path}. Duration will be set to None.")
+            pass
+
         self.metadata[button_id] = {
             "name": default_name,
-            "duration": None,
+            "duration": duration,
             "path": str(default_path),
             "timestamp": datetime.utcnow().isoformat(),
             "message_type": "default",
