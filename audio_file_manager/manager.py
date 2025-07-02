@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 import wave
 import shutil
 from pathlib import Path
@@ -19,26 +20,37 @@ try:
 except ImportError:
     AUDIO_BACKEND = None
 
+logger = logging.getLogger(__name__)
+
 
 class AudioFileManager:
-    def __init__(self, storage_dir: str = '/mnt/data/audio_manager', metadata_file: str='metadata.json', num_buttons: int = 16):
+    def __init__(self, storage_dir: str = None, metadata_file: str = None, num_buttons: int = 16):
+        if storage_dir is None:
+            base_dir = Path.home() / ".audio_files_manager"
+            storage_dir = base_dir / "storage"
+            if metadata_file is None:
+                metadata_file = base_dir / "metadata.json"
+
         self.storage_dir = Path(storage_dir)
-        self.metadata_file = Path(metadata_file)
+        self.metadata_file = Path(metadata_file) if metadata_file else self.storage_dir.parent / "metadata.json"
         self._temp_dir_obj = tempfile.TemporaryDirectory(prefix="audio_staging_")
         self.temp_dir = Path(self._temp_dir_obj.name)
         self.num_buttons = num_buttons
 
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.metadata = self._load_metadata()
+        logger.info(f"AudioFileManager initialized. Storage: {self.storage_dir}")
 
     def _load_metadata(self):
         if self.metadata_file.exists():
+            logger.debug(f"Loading metadata from {self.metadata_file}")
             with open(self.metadata_file, 'r') as f:
                 return json.load(f)
         return {}
 
     def _save_metadata(self):
         with open(self.metadata_file, 'w') as f:
+            logger.debug(f"Saving metadata to {self.metadata_file}")
             json.dump(self.metadata, f, indent=4)
 
     def record_audio_to_temp(self, button_id, message_type, stop_event: Event, channels=1, rate=44100):
@@ -133,11 +145,12 @@ class AudioFileManager:
     def finalize_recording(self, temp_path_info):
         button_id = str(temp_path_info["button_id"])
         if self.metadata.get(button_id, {}).get('read_only'):
-            print(f"Recording blocked: Button {button_id} is read-only.")
+            logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
             return
 
         final_path = self.storage_dir / Path(temp_path_info["temp_path"]).name
         shutil.move(temp_path_info["temp_path"], final_path)
+        logger.info(f"Finalized recording for button '{button_id}' to {final_path}")
 
         self.metadata[button_id] = {
             "name": final_path.name,
@@ -176,6 +189,7 @@ class AudioFileManager:
     def assign_default(self, button_id, file_path):
         button_id = str(button_id)
         if not Path(file_path).exists():
+            logger.error(f"Cannot assign default: source file not found at {file_path}")
             return
 
         default_name = f"default_{button_id}.wav"
@@ -187,8 +201,7 @@ class AudioFileManager:
             with wave.open(str(default_path), 'rb') as wf:
                 duration = round(wf.getnframes() / float(wf.getframerate()), 2)
         except wave.Error:
-            print(f"Error reading WAV file {default_path}. Duration will be set to None.")
-            pass
+            logger.warning(f"Could not read duration from {default_path}. Duration set to None.")
 
         self.metadata[button_id] = {
             "name": default_name,
@@ -206,6 +219,7 @@ class AudioFileManager:
         button_id = str(button_id)
         default_path = self.storage_dir / f"default_{button_id}.wav"
         if not default_path.exists():
+            logger.warning(f"Cannot restore default for '{button_id}': default file not found.")
             return
 
         restored_path = self.storage_dir / f"{button_id}_restored_{int(time.time())}.wav"
