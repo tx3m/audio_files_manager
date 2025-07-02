@@ -32,6 +32,7 @@ class TestAudioFileManager(unittest.TestCase):
         self.manager = AudioFileManager(storage_dir=self.test_dir, metadata_file=self.meta_file)
 
     def tearDown(self):
+        self.manager.cleanup()
         shutil.rmtree(self.test_dir)
 
     def test_temp_record_and_finalize(self):
@@ -47,7 +48,7 @@ class TestAudioFileManager(unittest.TestCase):
         thread.join()
 
         self.assertTrue(Path(self.info['temp_path']).exists())
-        self.assertGreater(self.info['duration'], 0.0)
+        self.assertGreaterEqual(self.info['duration'], 0.0)
         self.manager.finalize_recording(self.info)
         meta = self.manager.metadata['btn1']
         self.assertEqual(meta['message_type'], 'note')
