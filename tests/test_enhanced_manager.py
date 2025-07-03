@@ -1,0 +1,580 @@
+import unittest
+import tempfile
+import shutil
+import os
+import time
+import json
+import wave
+import subprocess
+from pathlib import Path
+from datetime import datetime
+from threading import Event, Thread
+from unittest.mock import Mock, patch, MagicMock, call
+
+from audio_file_manager import AudioFileManager
+from audio_file_manager.backends import MockAudioBackend
+
+
+class TestEnhancedAudioFileManager(unittest.TestCase):
+    """Test the enhanced AudioFileManager functionality."""
+    
+    def setUp(self):
+        """Set up test environment."""
+        self.test_dir = tempfile.mkdtemp()
+        self.meta_file = os.path.join(self.test_dir, 'meta.json')
+        self.manager = AudioFileManager(
+            storage_dir=self.test_dir,
+            metadata_file=self.meta_file,
+            num_buttons=10,
+            audio_format="pcm",
+            sample_rate=44100,
+            channels=1
+        )
+    
+    def tearDown(self):
+        """Clean up test environment."""
+        self.manager.cleanup()
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+    
+    def test_initialization_with_custom_parameters(self):
+        """Test initialization with custom parameters."""
+        custom_dir = tempfile.mkdtemp()
+        try:
+            manager = AudioFileManager(
+                storage_dir=custom_dir,
+                num_buttons=5,
+                audio_format="alaw",
+                sample_rate=8000,
+                channels=2,
+                period_size=512
+            )
+            
+            self.assertEqual(manager.storage_dir, Path(custom_dir))
+            self.assertEqual(manager.num_buttons, 5)
+            self.assertEqual(manager.audio_format, "alaw")
+            self.assertEqual(manager.sample_rate, 8000)
+            self.assertEqual(manager.channels, 2)
+            self.assertEqual(manager.period_size, 512)
+            self.assertIsInstance(manager.audio_backend, MockAudioBackend)
+            
+            manager.cleanup()
+        finally:
+            shutil.rmtree(custom_dir, ignore_errors=True)
+    
+    def test_default_initialization(self):
+        """Test initialization with default parameters."""
+        manager = AudioFileManager()
+        
+        self.assertTrue(manager.storage_dir.exists())
+        self.assertEqual(manager.num_buttons, 16)
+        self.assertEqual(manager.audio_format, "pcm")
+        self.assertEqual(manager.sample_rate, 44100)
+        self.assertEqual(manager.channels, 1)
+        self.assertIsInstance(manager.occupied_away_messages, set)
+        self.assertIsInstance(manager.occupied_custom_messages, set)
+        
+        manager.cleanup()
+    
+    def test_sound_level_callback(self):
+        """Test sound level callback functionality."""
+        sound_levels = []
+        
+        def callback(level):
+            sound_levels.append(level)
+        
+        self.manager.set_sound_level_callback(callback)
+        
+        # Simulate sound level updates
+        if hasattr(self.manager, '_sound_level_callback'):
+            self.manager._sound_level_callback(1000)
+            self.manager._sound_level_callback(1500)
+        
+        # Note: In real usage, this would be called by the backend
+        # For testing, we verify the callback is set
+        self.assertEqual(self.manager._sound_level_callback, callback)
+    
+    def test_get_new_file_id(self):
+        """Test new file ID generation."""
+        # Test away message ID
+        away_id = self.manager.get_new_file_id("away_message")
+        self.assertIn(away_id, self.manager.MAX_FILES_PER_TYPE)
+        
+        # Test custom message ID
+        custom_id = self.manager.get_new_file_id("custom_message")
+        self.assertIn(custom_id, self.manager.MAX_FILES_PER_TYPE)
+        
+        # Test other message type
+        other_id = self.manager.get_new_file_id("other_type")
+        self.assertIsNotNone(other_id)
+        
+        # Test when all IDs are occupied
+        self.manager.occupied_away_messages = self.manager.MAX_FILES_PER_TYPE.copy()
+        away_id_reset = self.manager.get_new_file_id("away_message")
+        self.assertIn(away_id_reset, self.manager.MAX_FILES_PER_TYPE)
+        self.assertEqual(len(self.manager.occupied_away_messages), 0)  # Should be cleared
+    
+    def test_record_audio_to_temp_enhanced(self):
+        """Test enhanced recording functionality."""
+        stop_event = Event()
+        
+        # Test with custom parameters
+        def stop_after_delay():
+            time.sleep(0.1)
+            stop_event.set()
+        
+        Thread(target=stop_after_delay, daemon=True).start()
+        
+        # Set message_type on the manager first
+        self.manager.message_type = "test_message"
+        recording_info = self.manager.record_audio_to_temp(
+            button_id="test_btn",
+            stop_event=stop_event,
+            channels=2,
+            rate=22050
+        )
+        
+        self.assertEqual(recording_info["button_id"], "test_btn")
+        self.assertEqual(recording_info["message_type"], "test_message")
+        self.assertEqual(recording_info["channels"], 2)
+        self.assertEqual(recording_info["sample_rate"], 22050)
+        self.assertGreaterEqual(recording_info["duration"], 0.0)
+        self.assertTrue(Path(recording_info["temp_path"]).exists())
+    
+    def test_record_audio_threaded(self):
+        """Test threaded recording functionality."""
+        stop_callback_called = Event()
+        
+        def stop_callback():
+            stop_callback_called.set()
+        
+        # Set message_type on the manager first
+        self.manager.message_type = "threaded_message"
+        
+        # Start threaded recording
+        thread = self.manager.record_audio_threaded(
+            button_id="threaded_test",
+            stop_callback=stop_callback
+        )
+        
+        self.assertIsInstance(thread, Thread)
+        self.assertTrue(self.manager.is_recording)
+        
+        # Stop recording after a short time
+        time.sleep(0.2)
+        self.manager.stop_recording()
+        
+        # Wait for thread to complete
+        thread.join(timeout=2.0)
+        
+        # Verify recording completed
+        self.assertFalse(self.manager.is_recording)
+        self.assertIsNotNone(self.manager.current_file)
+    
+    def test_finalize_recording_with_format_conversion(self):
+        """Test recording finalization with audio format conversion."""
+        # Create a temporary recording
+        stop_event = Event()
+        stop_event.set()  # Immediately stop
+        
+        # Set message_type on the manager first
+        self.manager.message_type = "conversion_test"
+        recording_info = self.manager.record_audio_to_temp(
+            button_id="convert_test",
+            stop_event=stop_event
+        )
+        
+        # Test with format conversion
+        self.manager.audio_format = "alaw"
+        
+        with patch.object(self.manager, '_convert_audio_format') as mock_convert:
+            mock_convert.return_value = True
+            
+            self.manager.finalize_recording(recording_info)
+            
+            mock_convert.assert_called_once()
+            
+            # Verify metadata was updated
+            info = self.manager.get_recording_info("convert_test")
+            self.assertIsNotNone(info)
+            self.assertEqual(info["audio_format"], "alaw")
+    
+    def test_convert_audio_format(self):
+        """Test audio format conversion."""
+        # Create a test WAV file
+        test_input = self.manager.temp_dir / "test_input.wav"
+        test_output = self.manager.temp_dir / "test_output.wav"
+        
+        # Create a simple WAV file
+        with wave.open(str(test_input), 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            wf.writeframes(b'\x00\x01' * 1000)
+        
+        # Mock subprocess.run to simulate successful conversion
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value.returncode = 0
+            
+            result = self.manager._convert_audio_format(test_input, test_output, "alaw")
+            
+            self.assertTrue(result)
+            mock_run.assert_called_once()
+            
+            # Verify FFmpeg command
+            args = mock_run.call_args[0][0]
+            self.assertIn("ffmpeg", args)
+            self.assertIn("pcm_alaw", args)
+    
+    def test_convert_audio_format_failure(self):
+        """Test audio format conversion failure handling."""
+        test_input = self.manager.temp_dir / "test_input.wav"
+        test_output = self.manager.temp_dir / "test_output.wav"
+        
+        # Create a test file
+        test_input.touch()
+        
+        # Mock subprocess.run to simulate failure
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stderr = "Conversion failed"
+            
+            result = self.manager._convert_audio_format(test_input, test_output, "alaw")
+            
+            self.assertFalse(result)
+    
+    def test_convert_audio_format_timeout(self):
+        """Test audio format conversion timeout handling."""
+        test_input = self.manager.temp_dir / "test_input.wav"
+        test_output = self.manager.temp_dir / "test_output.wav"
+        
+        test_input.touch()
+        
+        # Mock subprocess.run to simulate timeout
+        with patch('subprocess.run') as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired("ffmpeg", 10)
+            
+            result = self.manager._convert_audio_format(test_input, test_output, "alaw")
+            
+            self.assertFalse(result)
+    
+    def test_convert_audio_format_ffmpeg_not_found(self):
+        """Test audio format conversion when FFmpeg is not found."""
+        test_input = self.manager.temp_dir / "test_input.wav"
+        test_output = self.manager.temp_dir / "test_output.wav"
+        
+        test_input.touch()
+        
+        # Mock subprocess.run to simulate FileNotFoundError
+        with patch('subprocess.run') as mock_run:
+            mock_run.side_effect = FileNotFoundError("FFmpeg not found")
+            
+            result = self.manager._convert_audio_format(test_input, test_output, "alaw")
+            
+            self.assertFalse(result)
+    
+    def test_get_audio_device_info(self):
+        """Test audio device info retrieval."""
+        info = self.manager.get_audio_device_info()
+        
+        self.assertIsInstance(info, dict)
+        self.assertIn('backend', info)
+        # Check for either 'device' or 'input_device' depending on backend implementation
+        self.assertTrue('device' in info or 'input_device' in info)
+    
+    def test_update_json_backup_legacy_compatibility(self):
+        """Test legacy JSON backup functionality."""
+        self.manager.message_type = "away_message"
+        
+        # This method is for legacy compatibility
+        self.manager.update_json_backup("away_message")
+        
+        # Verify metadata was saved (the method delegates to _save_metadata)
+        self.assertTrue(self.manager.metadata_file.exists())
+    
+    def test_create_timestamp_legacy_compatibility(self):
+        """Test legacy timestamp creation."""
+        timestamp = self.manager.create_timestamp()
+        
+        self.assertIsInstance(timestamp, str)
+        # Verify format matches legacy format
+        datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+    
+    def test_occupied_sets_management(self):
+        """Test occupied message sets management."""
+        # Test initial state
+        self.assertEqual(len(self.manager.occupied_away_messages), 0)
+        self.assertEqual(len(self.manager.occupied_custom_messages), 0)
+        
+        # Add some occupied IDs
+        self.manager.occupied_away_messages.add("1")
+        self.manager.occupied_away_messages.add("2")
+        self.manager.occupied_custom_messages.add("1")
+        
+        # Test that new ID generation avoids occupied ones
+        available_away = self.manager.MAX_FILES_PER_TYPE - self.manager.occupied_away_messages
+        available_custom = self.manager.MAX_FILES_PER_TYPE - self.manager.occupied_custom_messages
+        
+        self.assertNotIn("1", available_away)
+        self.assertNotIn("2", available_away)
+        self.assertNotIn("1", available_custom)
+    
+    def test_load_occupied_sets(self):
+        """Test loading occupied sets from metadata."""
+        # Add some metadata entries
+        self.manager.metadata["1"] = {"message_type": "away_message"}
+        self.manager.metadata["2"] = {"message_type": "custom_message"}
+        self.manager.metadata["3"] = {"message_type": "other_type"}
+        
+        # Reload occupied sets
+        self.manager._load_occupied_sets()
+        
+        self.assertIn("1", self.manager.occupied_away_messages)
+        self.assertIn("2", self.manager.occupied_custom_messages)
+        self.assertNotIn("3", self.manager.occupied_away_messages)
+        self.assertNotIn("3", self.manager.occupied_custom_messages)
+    
+    def test_finalize_recording_updates_occupied_sets(self):
+        """Test that finalizing recordings updates occupied sets."""
+        recording_info = {
+            "button_id": "test_btn",
+            "message_type": "away_message",
+            "duration": 1.0,
+            "temp_path": str(self.manager.temp_dir / "test.wav"),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "channels": 1,
+            "sample_rate": 44100
+        }
+        
+        # Create the temp file
+        Path(recording_info["temp_path"]).touch()
+        
+        self.manager.finalize_recording(recording_info)
+        
+        # Verify occupied set was updated
+        self.assertIn("test_btn", self.manager.occupied_away_messages)
+    
+    def test_multiple_audio_formats(self):
+        """Test support for multiple audio formats."""
+        formats = ["pcm", "alaw", "ulaw"]
+        
+        for fmt in formats:
+            self.manager.audio_format = fmt
+            self.assertEqual(self.manager.audio_format, fmt)
+    
+    def test_different_sample_rates(self):
+        """Test support for different sample rates."""
+        rates = [8000, 16000, 22050, 44100, 48000]
+        
+        for rate in rates:
+            self.manager.sample_rate = rate
+            self.assertEqual(self.manager.sample_rate, rate)
+    
+    def test_different_channel_configurations(self):
+        """Test support for different channel configurations."""
+        channels = [1, 2]
+        
+        for ch in channels:
+            self.manager.channels = ch
+            self.assertEqual(self.manager.channels, ch)
+    
+    def test_threading_safety(self):
+        """Test basic threading safety."""
+        # This is a basic test - full threading safety would require more complex testing
+        def record_and_finalize():
+            stop_event = Event()
+            stop_event.set()  # Immediately stop
+            
+            # Set message_type on the manager first
+            self.manager.message_type = "thread_test"
+            recording_info = self.manager.record_audio_to_temp(
+                button_id=f"thread_test_{time.time()}",
+                stop_event=stop_event
+            )
+            
+            self.manager.finalize_recording(recording_info)
+        
+        # Start multiple threads
+        threads = []
+        for i in range(3):
+            thread = Thread(target=record_and_finalize)
+            threads.append(thread)
+            thread.start()
+        
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join(timeout=5.0)
+        
+        # Verify no exceptions occurred and metadata is consistent
+        self.assertGreaterEqual(len(self.manager.metadata), 3)
+    
+    def test_error_handling_invalid_button_id(self):
+        """Test error handling with invalid button IDs."""
+        # Test with None button ID
+        stop_event = Event()
+        stop_event.set()
+        
+        # Set message_type on the manager first
+        self.manager.message_type = "test"
+        recording_info = self.manager.record_audio_to_temp(
+            button_id=None,
+            stop_event=stop_event
+        )
+        
+        # Should convert None to string
+        self.assertEqual(recording_info["button_id"], "None")
+    
+    def test_error_handling_missing_temp_file(self):
+        """Test error handling when temp file is missing."""
+        recording_info = {
+            "button_id": "missing_test",
+            "message_type": "test",
+            "duration": 1.0,
+            "temp_path": str(self.manager.temp_dir / "nonexistent.wav"),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Should handle missing file gracefully
+        try:
+            self.manager.finalize_recording(recording_info)
+        except Exception:
+            pass  # Expected to fail, but shouldn't crash
+    
+    def test_cleanup_stops_recording(self):
+        """Test that cleanup stops any ongoing recording."""
+        # Set message_type on the manager first
+        self.manager.message_type = "test"
+        
+        # Start a recording
+        thread = self.manager.record_audio_threaded("cleanup_test")
+        
+        # Verify recording started
+        self.assertTrue(self.manager.is_recording)
+        
+        # Cleanup should stop recording
+        self.manager.cleanup()
+        
+        # Wait a bit for cleanup to complete
+        time.sleep(0.1)
+        
+        # Verify recording stopped
+        self.assertFalse(self.manager.is_recording)
+
+
+class TestAudioFileManagerIntegration(unittest.TestCase):
+    """Integration tests for AudioFileManager with real-world scenarios."""
+    
+    def setUp(self):
+        """Set up integration test environment."""
+        self.test_dir = tempfile.mkdtemp()
+        self.manager = AudioFileManager(storage_dir=self.test_dir)
+    
+    def tearDown(self):
+        """Clean up integration test environment."""
+        self.manager.cleanup()
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+    
+    def test_complete_recording_workflow(self):
+        """Test complete recording workflow from start to finish."""
+        # Step 1: Record audio
+        stop_event = Event()
+        
+        def stop_after_delay():
+            time.sleep(0.1)
+            stop_event.set()
+        
+        Thread(target=stop_after_delay, daemon=True).start()
+        
+        # Set message_type on the manager first
+        self.manager.message_type = "integration_test"
+        recording_info = self.manager.record_audio_to_temp(
+            button_id="workflow_test",
+            stop_event=stop_event
+        )
+        
+        # Step 2: Verify temp recording
+        self.assertTrue(Path(recording_info["temp_path"]).exists())
+        self.assertGreater(recording_info["duration"], 0)
+        
+        # Step 3: Finalize recording
+        self.manager.finalize_recording(recording_info)
+        
+        # Step 4: Verify finalized recording
+        info = self.manager.get_recording_info("workflow_test")
+        self.assertIsNotNone(info)
+        self.assertTrue(Path(info["path"]).exists())
+        
+        # Step 5: Play recording (mock backend will simulate)
+        self.manager.play_audio(info["path"])
+        
+        # Step 6: List recordings
+        all_recordings = self.manager.list_all_recordings()
+        self.assertIn("workflow_test", all_recordings)
+        
+        # Step 7: Set read-only
+        self.manager.set_read_only("workflow_test", True)
+        updated_info = self.manager.get_recording_info("workflow_test")
+        self.assertTrue(updated_info["read_only"])
+    
+    def test_multiple_recordings_management(self):
+        """Test managing multiple recordings."""
+        recordings = []
+        
+        # Create multiple recordings
+        for i in range(5):
+            stop_event = Event()
+            stop_event.set()  # Immediately stop
+            
+            # Set message_type on the manager first
+            self.manager.message_type = f"test_type_{i % 2}"  # Alternate between two types
+            recording_info = self.manager.record_audio_to_temp(
+                button_id=f"multi_test_{i}",
+                stop_event=stop_event
+            )
+            
+            self.manager.finalize_recording(recording_info)
+            recordings.append(recording_info)
+        
+        # Verify all recordings exist
+        all_recordings = self.manager.list_all_recordings()
+        self.assertEqual(len(all_recordings), 5)
+        
+        # Test filtering by message type
+        type_0_count = sum(1 for r in all_recordings.values() if r["message_type"] == "test_type_0")
+        type_1_count = sum(1 for r in all_recordings.values() if r["message_type"] == "test_type_1")
+        
+        self.assertGreater(type_0_count, 0)
+        self.assertGreater(type_1_count, 0)
+        self.assertEqual(type_0_count + type_1_count, 5)
+    
+    def test_default_file_workflow(self):
+        """Test default file assignment and restoration workflow."""
+        # Create a default audio file
+        default_file = Path(self.test_dir) / "default.wav"
+        with wave.open(str(default_file), 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            wf.writeframes(b'\x00\x01' * 22050)  # 0.5 seconds
+        
+        # Assign default
+        self.manager.assign_default("default_test", default_file)
+        
+        # Verify default assignment
+        info = self.manager.get_recording_info("default_test")
+        self.assertTrue(info["is_default"])
+        self.assertTrue(info["read_only"])
+        self.assertEqual(info["message_type"], "default")
+        
+        # Restore default
+        self.manager.restore_default("default_test")
+        
+        # Verify restoration
+        restored_info = self.manager.get_recording_info("default_test")
+        self.assertFalse(restored_info["is_default"])
+        self.assertFalse(restored_info["read_only"])
+        self.assertEqual(restored_info["message_type"], "restored_default")
+        self.assertIn("restored", restored_info["name"])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -182,15 +182,22 @@ class LegacyServiceAdapter:
     
     def run(self, message_type):
         """Start recording a message."""
-        if self._message_record_thread is None:
-            self._message_record_thread = Thread(
-                target=self._record_audio, 
-                kwargs={"message_type": message_type},
-                daemon=True, 
-                name="MsgRecord"
-            )
-            self._message_record_thread.start()
+        # Set the message type for this recording
+        self.message_type = message_type
         
+        # Generate a new file name
+        self._generate_new_file_name()
+        
+        # Start recording using the enhanced manager's encapsulated method
+        self.audio_manager.start_recording(
+            button_id=self.current_file["id"],
+            message_type=message_type,
+            stop_callback=self._recording_completed_callback
+        )
+        
+        self.is_running = True
+        
+        # Start sound level updater if available
         if self.sound_level_updater and not hasattr(self.sound_level_updater, '_thread'):
             self.sound_level_updater._thread = Thread(
                 target=self.sound_level_updater.run,
@@ -199,23 +206,74 @@ class LegacyServiceAdapter:
             )
             self.sound_level_updater._thread.start()
     
+    def _recording_completed_callback(self):
+        """Called when recording is completed."""
+        # Get the recording info from the manager
+        if self.audio_manager.current_file:
+            # Update the current file with the recording info
+            self.current_file.update({
+                "duration": self.audio_manager.current_file.get("duration", 0),
+                "temp_path": self.audio_manager.current_file.get("temp_path", ""),
+                "timestamp": self.audio_manager.current_file.get("timestamp", self._create_timestamp())
+            })
+            
+            # Process the recording (convert format if needed and save to final location)
+            self._process_recording()
+            
+            # Update JSON backup
+            self.update_json_backup(self.message_type)
+        
+        self.is_running = False
+        
+    def _process_recording(self):
+        """Process the recording (convert format if needed and save to final location)."""
+        if not self.audio_manager.current_file:
+            return
+            
+        temp_path = self.audio_manager.current_file.get("temp_path")
+        if not temp_path or not Path(temp_path).exists():
+            logger.warning("No temporary recording file found")
+            return
+            
+        # Get the final output path
+        output_file = os.path.join(self.message_path, self.current_file["filename"])
+        
+        # Convert audio format if needed
+        if self.audio_manager.audio_format in ["alaw", "ulaw"]:
+            success = self.audio_manager._convert_audio_format(
+                Path(temp_path), 
+                Path(output_file),
+                self.audio_manager.audio_format
+            )
+            if not success:
+                # If conversion fails, just copy the file
+                shutil.copy(temp_path, output_file)
+        else:
+            # Just copy the file
+            shutil.copy(temp_path, output_file)
+    
     def exit(self):
         """Stop recording and clean up resources."""
         self._exit_flag = True
         
+        # Stop any active recording using the manager's method
+        if self.audio_manager.is_recording_active():
+            self.audio_manager.stop_recording()
+            logger.info("Stopped active recording")
+        
+        # Stop sound level updater if running
         if self.sound_level_updater and hasattr(self.sound_level_updater, '_thread'):
             self.sound_level_updater.exit()
             self.sound_level_updater._thread.join()
             self.sound_level_updater._thread = None
             logger.info("Closed Sound level updater thread")
         
-        if self._message_record_thread is not None:
-            self._message_record_thread.join()
-            self._message_record_thread = None
-            logger.info("Closed Recording thread")
-        
+        # Reset UI elements
         self._reset_buttons_default_state()
+        
+        # Reset flags
         self._exit_flag = False
+        self.is_running = False
     
     def _reset_buttons_default_state(self):
         """Reset button states to default."""
@@ -242,49 +300,11 @@ class LegacyServiceAdapter:
         if sync and self.nextion_interface.nextion_panel_sync_leds_callback_fn:
             self.nextion_interface.nextion_panel_sync_leds_callback_fn()
     
-    def _record_audio(self, message_type="custom_message"):
-        """Record audio using the AudioFileManager."""
-        logger.info(f"Start recording message.")
-        self.message_type = message_type
-        self.is_running = True
-        
-        # Generate filename for the new recording
-        self._generate_new_file_name()
-        
-        # Create a stop event for the recording
-        stop_event = Event()
-        
-        # Start recording using the AudioFileManager
-        try:
-            # Record audio to temp file
-            temp_recording = self.audio_manager.record_audio_to_temp(
-                button_id=self.current_file["id"],
-                message_type=message_type,
-                stop_event=stop_event,
-                channels=self.audio_manager.channels,
-                rate=self.audio_manager.sample_rate
-            )
-            
-            # Convert to the desired format if needed
-            if self.audio_manager.audio_format in ["alaw", "ulaw"]:
-                output_file = os.path.join(self.message_path, self.current_file["filename"])
-                self.audio_manager._convert_audio_format(
-                    Path(temp_recording["temp_path"]), 
-                    Path(output_file),
-                    self.audio_manager.audio_format
-                )
-            else:
-                # Move the temp file to the final location
-                shutil.copy(temp_recording["temp_path"], os.path.join(self.message_path, self.current_file["filename"]))
-            
-            # Update JSON backup
-            self.update_json_backup(self.message_type)
-            
-        except Exception as e:
-            logger.error(f"Error during recording: {e}")
-        finally:
-            self.is_running = False
-            logger.info(f"Stop recording message")
+    # The _record_audio method has been removed and replaced by the encapsulated recording methods
+    # in the AudioFileManager. The recording process is now managed by:
+    # 1. The start_recording method in AudioFileManager
+    # 2. The _recording_completed_callback method in LegacyServiceAdapter
+    # 3. The _process_recording method in LegacyServiceAdapter
     
     #
     # RecordedMessagesService compatibility methods
@@ -298,7 +318,8 @@ class LegacyServiceAdapter:
         if self._away_messages:
             newest_away_id = self._find_newest_message_id(self._away_messages)
             if newest_away_id:
-                self._current_file = {
+                # Use self.current_file instead of self._current_file
+                self.current_file = {
                     "away_message": self._away_messages[newest_away_id]["filename"]
                 }
         
@@ -306,9 +327,9 @@ class LegacyServiceAdapter:
         if self._custom_messages:
             newest_custom_id = self._find_newest_message_id(self._custom_messages)
             if newest_custom_id:
-                if not hasattr(self, '_current_file'):
-                    self._current_file = {}
-                self._current_file["custom_message"] = self._custom_messages[newest_custom_id]["filename"]
+                if not hasattr(self, 'current_file') or not self.current_file:
+                    self.current_file = {}
+                self.current_file["custom_message"] = self._custom_messages[newest_custom_id]["filename"]
     
     def _find_newest_message_id(self, messages_dict):
         """Find the newest message ID based on timestamp."""
@@ -343,7 +364,8 @@ class LegacyServiceAdapter:
         
         if audio_file_type == "away_message" and self._away_messages:
             if audio_file_id == "":  # Load the newest file
-                audio_file_name = self._current_file.get("away_message")
+                # Use self.current_file instead of self._current_file
+                audio_file_name = self.current_file.get("away_message")
             else:  # Load the particular file requested
                 audio_file_name = self._away_messages.get(audio_file_id, {}).get("filename")
             
@@ -353,7 +375,8 @@ class LegacyServiceAdapter:
         
         elif audio_file_type == "custom_message" and self._custom_messages:
             if audio_file_id == "":  # Load the newest file
-                audio_file_name = self._current_file.get("custom_message")
+                # Use self.current_file instead of self._current_file
+                audio_file_name = self.current_file.get("custom_message")
             else:
                 audio_file_name = self._custom_messages.get(audio_file_id, {}).get("filename")
             
@@ -415,3 +438,17 @@ class LegacyServiceAdapter:
         if self._played_once != new_value:
             logger.debug(f"Changing self._played_once to {new_value}")
             self._played_once = new_value
+            
+    def finished(self):
+        """
+        Ends the operation after the playback has finished and returns True
+        Otherwise immediately returns False
+        
+        This method is required for compatibility with the legacy RecordedMessagesService.
+        """
+        # Since we're using the AudioFileManager's play_audio method which is blocking,
+        # we can determine if playback is finished based on is_running flag
+        if not self.is_running and self._played_once:
+            self._played_once = True
+            return True
+        return False

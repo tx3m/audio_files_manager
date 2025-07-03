@@ -73,7 +73,7 @@ class TestAudioFileManagerMetadataOnly(unittest.TestCase):
             "path": str(final_path),
             "read_only": False,
             "message_type": "saved",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "duration": 1.0,
             "audio_format": "wav"
         }

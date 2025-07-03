@@ -16,6 +16,7 @@ Dependencies are chosen automatically on installation.
 ## Features
 
 - **Cross-platform audio recording and playback**: Works seamlessly across Linux, Windows, and macOS
+- **Separate input/output devices**: Specify different devices for recording and playback
 - **OS abstraction**: Each audio backend has its own class, making the main manager clean and extensible
 - **Message type management**: Support for different message types (away_message, custom_message, etc.)
 - **File ID management**: Tracks occupied IDs to prevent overwriting
@@ -31,9 +32,11 @@ The module is designed with a clean separation of concerns:
 
 - `AudioFileManager`: Main class that handles recording, playback, and file management
 - `AudioBackend`: Abstract base class for audio backends
-  - `ALSABackend`: Linux-specific implementation using ALSA
-  - `SoundDeviceBackend`: Cross-platform implementation for Windows and macOS
+  - `ALSABackend`: Linux-specific implementation using ALSA (supports separate input/output devices)
+  - `SoundDeviceBackend`: Cross-platform implementation for Windows and macOS (supports separate input/output devices)
   - `MockAudioBackend`: Testing implementation when no audio hardware is available
+
+See [AUDIO_DEVICE_GUIDE.md](AUDIO_DEVICE_GUIDE.md) for detailed information on configuring audio devices.
 - `LegacyServiceAdapter`: Adapter class that provides compatibility with legacy services
   - Integrates MessageRecordService functionality
   - Integrates RecordedMessagesService functionality
@@ -56,7 +59,12 @@ recording_info = manager.record_audio_to_temp("button1", "greeting", stop_event)
 # Finalize the recording
 manager.finalize_recording(recording_info)
 
-# Play back the recording
+# Play back the recording (two equivalent ways)
+# Method 1: Using the button ID directly (new enhanced approach)
+result = manager.play_audio("button1")
+print(f"Playback successful: {result}")
+
+# Method 2: Using the file path (legacy approach)
 info = manager.get_recording_info("button1")
 manager.play_audio(info["path"])
 
@@ -71,6 +79,8 @@ manager.cleanup()
 manager = AudioFileManager(
     storage_dir="/path/to/storage",
     metadata_file="/path/to/metadata.json",
+    input_device="hw:0,0",    # Specify input device for recording
+    output_device="hw:1,0",   # Specify output device for playback
     num_buttons=10,
     audio_format="alaw",  # "pcm", "alaw", or "ulaw"
     sample_rate=16000,
@@ -116,6 +126,8 @@ from audio_file_manager import AudioFileManager, LegacyServiceAdapter
 # Initialize the AudioFileManager
 manager = AudioFileManager(
     storage_dir="/path/to/storage",
+    input_device="default",    # Device for recording
+    output_device="default",   # Device for playback
     audio_format="alaw",  # Legacy format
     sample_rate=8000      # Legacy sample rate
 )

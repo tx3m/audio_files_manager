@@ -40,7 +40,9 @@ class TestAudioFileManager(unittest.TestCase):
         stop_event = threading.Event()
 
         def record():
-            self.info = self.manager.record_audio_to_temp('btn1', 'note', stop_event)
+            # Set message_type on the manager first
+            self.manager.message_type = 'note'
+            self.info = self.manager.record_audio_to_temp('btn1', stop_event)
 
         thread = threading.Thread(target=record)
         thread.start()
@@ -62,7 +64,7 @@ class TestAudioFileManager(unittest.TestCase):
             "name": "confirmed.wav",
             "path": str(confirmed_path),
             "read_only": False,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "message_type": "confirmed",
             "duration": 1.0,
             "audio_format": "wav"

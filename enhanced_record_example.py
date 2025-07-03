@@ -35,8 +35,11 @@ class EnhancedInteractiveAudioTester:
     def __init__(self):
         self.log = logging.getLogger("EnhancedRecordExample")
         
-        # Initialize with enhanced features
+        # Initialize with enhanced features and separate audio devices
         self.manager = AudioFileManager(
+            # Specify separate input and output devices
+            input_device="default",   # Device used for recording
+            output_device="default",  # Device used for playback
             num_buttons=10,
             audio_format="pcm",  # Can be changed to "alaw" or "ulaw"
             sample_rate=44100,   # Can be changed to 8000 for legacy compatibility
@@ -153,69 +156,73 @@ class EnhancedInteractiveAudioTester:
         print(f"  Storage: {self.manager.storage_dir}")
         print(f"  Device Info: {device_info.get('device', 'N/A')}")
     
-    def _record_task(self, event: threading.Event):
-        """The target function for the recording thread."""
-        self.log.info("Recording thread started. Say something!")
-        print("\n")  # New line for VU meter
+    def _recording_completed_callback(self):
+        """Callback when recording is completed."""
+        print("\n")  # Clear VU meter line
         
-        try:
-            self.temp_info = self.manager.record_audio_to_temp(
-                button_id=self.current_button,
-                message_type=self.current_message_type,
-                stop_event=event
-            )
-            print("\n")  # Clear VU meter line
+        if self.manager.current_file:
+            self.temp_info = self.manager.current_file.copy()
             self.log.info(f"Recording completed: {self.temp_info.get('duration', 0):.2f} seconds")
-        except Exception as e:
-            print("\n")  # Clear VU meter line
-            self.log.error(f"Recording failed: {e}")
+        else:
+            self.log.error("Recording failed or no audio captured")
             self.temp_info = None
     
     # Basic recording commands
     def _handle_start(self):
         """Start recording."""
-        if self.recording_thread and self.recording_thread.is_alive():
+        if self.manager.is_recording_active():
             self.log.warning("A recording is already in progress.")
             return
         
         self.sound_levels.clear()
-        self.stop_event = threading.Event()
-        self.recording_thread = threading.Thread(
-            target=self._record_task, 
-            args=(self.stop_event,)
+        self.temp_info = None
+        
+        # Start recording using the encapsulated method
+        success = self.manager.start_recording(
+            button_id=self.current_button,
+            message_type=self.current_message_type,
+            stop_callback=self._recording_completed_callback
         )
-        self.recording_thread.start()
+        
+        if success:
+            self.log.info(f"Recording started for button {self.current_button}")
+            print("\n")  # New line for VU meter
+        else:
+            self.log.error("Failed to start recording")
     
     def _handle_stop(self):
         """Stop recording."""
-        if not (self.recording_thread and self.recording_thread.is_alive() and self.stop_event):
+        if not self.manager.is_recording_active():
             self.log.warning("No recording is currently active.")
             return
         
-        self.log.info("Signaling recording to stop...")
-        self.stop_event.set()
-        self.recording_thread.join()
+        self.log.info("Stopping recording...")
+        success = self.manager.stop_recording()
         
-        if self.temp_info:
-            self.log.info(f"Recording stopped. Temporary file: {self.temp_info.get('temp_path')}")
+        if success:
+            self.log.info("Recording stopped successfully")
+            # Sound level statistics will be shown in the callback
             if self.sound_levels:
                 avg_level = sum(self.sound_levels) / len(self.sound_levels)
                 max_level = max(self.sound_levels)
                 self.log.info(f"Sound levels - Average: {avg_level:.0f}, Peak: {max_level}")
         else:
-            self.log.error("Recording failed or no audio captured.")
+            self.log.error("Failed to stop recording properly")
     
     def _handle_cancel(self):
         """Cancel recording."""
-        if not (self.recording_thread and self.recording_thread.is_alive() and self.stop_event):
+        if not self.manager.is_recording_active():
             self.log.warning("No recording is currently active.")
             return
         
         self.log.info("Canceling recording...")
-        self.stop_event.set()
-        self.recording_thread.join()
-        self.log.info("Recording canceled and discarded.")
-        self.temp_info = None
+        success = self.manager.stop_recording()
+        
+        if success:
+            self.log.info("Recording canceled and discarded.")
+            self.temp_info = None
+        else:
+            self.log.error("Failed to cancel recording properly")
     
     def _handle_play(self):
         """Play temporary recording."""
@@ -413,10 +420,13 @@ class EnhancedInteractiveAudioTester:
     
     def _handle_exit(self):
         """Exit the application."""
-        if self.recording_thread and self.recording_thread.is_alive() and self.stop_event:
+        if self.manager.is_recording_active():
             self.log.info("Stopping active recording before exit...")
-            self.stop_event.set()
-            self.recording_thread.join()
+            self.manager.stop_recording()
+        
+        # Clean up any resources
+        self.manager.cleanup()
+        
         return True  # Signal to exit
     
     def run(self):

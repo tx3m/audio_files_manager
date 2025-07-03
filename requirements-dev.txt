@@ -1,0 +1,18 @@
+# Development dependencies for the Enhanced Audio File Manager
+
+# Testing
+pytest>=6.0.0
+pytest-cov>=2.10.0
+
+# Code quality
+black>=21.0.0
+flake8>=3.8.0
+
+# Audio dependencies (all platforms)
+pyalsaaudio>=0.8.0; sys_platform == "linux"
+sounddevice>=0.4.0; sys_platform != "linux"
+numpy>=1.19.0; sys_platform != "linux"
+
+# Optional: Documentation
+# sphinx>=4.0.0
+# sphinx-rtd-theme>=1.0.0

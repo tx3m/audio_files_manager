@@ -41,8 +41,9 @@ class AudioBackend(ABC):
 class ALSABackend(AudioBackend):
     """ALSA audio backend for Linux systems."""
     
-    def __init__(self, device: str = "default"):
-        self.device = device
+    def __init__(self, input_device: str = "default", output_device: str = "default"):
+        self.input_device = input_device
+        self.output_device = output_device
         self._audio_input = None
         
     def is_available(self) -> bool:
@@ -61,7 +62,7 @@ class ALSABackend(AudioBackend):
             raise RuntimeError("ALSA audio not available")
         
         # Configure ALSA input
-        inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NONBLOCK, device=self.device)
+        inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NONBLOCK, device=self.input_device)
         inp.setchannels(channels)
         inp.setrate(rate)
         inp.setformat(alsaaudio.PCM_FORMAT_S16_LE)
@@ -71,7 +72,7 @@ class ALSABackend(AudioBackend):
         frames = []
         sound_level_counter = 0
         
-        logger.info(f"ALSA recording started: device={self.device}, rate={rate}, channels={channels}")
+        logger.info(f"ALSA recording started: input_device={self.input_device}, rate={rate}, channels={channels}")
         
         try:
             while not stop_event.is_set():
@@ -101,7 +102,7 @@ class ALSABackend(AudioBackend):
             raise RuntimeError("ALSA audio not available")
         
         # ALSA playback implementation
-        out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=self.device)
+        out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=self.output_device)
         out.setchannels(channels)
         out.setrate(rate)
         out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
@@ -122,14 +123,15 @@ class ALSABackend(AudioBackend):
                 return self._audio_input.info()
             except:
                 pass
-        return {"device": self.device, "backend": "ALSA"}
+        return {"input_device": self.input_device, "output_device": self.output_device, "backend": "ALSA"}
 
 
 class SoundDeviceBackend(AudioBackend):
     """SoundDevice backend for Windows, macOS, and other platforms."""
     
-    def __init__(self, device: Optional[int] = None):
-        self.device = device
+    def __init__(self, input_device: Optional[int] = None, output_device: Optional[int] = None):
+        self.input_device = input_device
+        self.output_device = output_device
         
     def is_available(self) -> bool:
         try:
@@ -158,10 +160,10 @@ class SoundDeviceBackend(AudioBackend):
         
         audio_chunks = []
         
-        logger.info(f"SoundDevice recording started: device={self.device}, rate={rate}, channels={channels}")
+        logger.info(f"SoundDevice recording started: input_device={self.input_device}, rate={rate}, channels={channels}")
         
         with sd.InputStream(callback=callback, channels=channels, samplerate=rate, 
-                          dtype='int16', device=self.device):
+                          dtype='int16', device=self.input_device):
             while not stop_event.is_set():
                 try:
                     data = q.get(timeout=0.1)
@@ -196,17 +198,28 @@ class SoundDeviceBackend(AudioBackend):
             audio_array = audio_array.reshape(-1, channels)
         
         logger.info(f"Playing audio: {len(audio_array)} samples at {rate}Hz")
-        sd.play(audio_array, samplerate=rate, blocking=True)
+        sd.play(audio_array, samplerate=rate, device=self.output_device, blocking=True)
     
     def get_device_info(self) -> Dict[str, Any]:
         try:
             import sounddevice as sd
-            if self.device is not None:
-                return sd.query_devices(self.device)
+            info = {"backend": "SoundDevice"}
+            
+            # Get input device info
+            if self.input_device is not None:
+                info["input_device"] = sd.query_devices(self.input_device)
             else:
-                return sd.query_devices(sd.default.device[0])  # Input device
+                info["input_device"] = sd.query_devices(sd.default.device[0])
+                
+            # Get output device info
+            if self.output_device is not None:
+                info["output_device"] = sd.query_devices(self.output_device)
+            else:
+                info["output_device"] = sd.query_devices(sd.default.device[1])
+                
+            return info
         except:
-            return {"device": self.device, "backend": "SoundDevice"}
+            return {"input_device": self.input_device, "output_device": self.output_device, "backend": "SoundDevice"}
 
 
 class MockAudioBackend(AudioBackend):
@@ -235,22 +248,38 @@ class MockAudioBackend(AudioBackend):
         time.sleep(len(audio_data) / (rate * channels * 2))  # Simulate playback time
     
     def get_device_info(self) -> Dict[str, Any]:
-        return {"device": "mock", "backend": "Mock", "available": True}
+        return {"input_device": "mock", "output_device": "mock", "backend": "Mock", "available": True}
 
 
-def get_audio_backend(device: Optional[str] = None) -> AudioBackend:
+def get_audio_backend(input_device: Optional[str] = None, output_device: Optional[str] = None) -> AudioBackend:
     """Factory function to get the appropriate audio backend for the current platform."""
 
     # Try ALSA first on Linux
     if platform.system() == "Linux":
-        alsa_backend = ALSABackend(device or "default")
+        alsa_backend = ALSABackend(input_device or "default", output_device or "default")
         if alsa_backend.is_available():
             logger.info("Using ALSA audio backend")
             return alsa_backend
 
     
     # Fall back to SoundDevice
-    sounddevice_backend = SoundDeviceBackend()
+    # Convert string device names to integers for SoundDevice if needed
+    input_dev = None
+    output_dev = None
+    
+    if input_device is not None:
+        try:
+            input_dev = int(input_device)
+        except (ValueError, TypeError):
+            input_dev = None
+            
+    if output_device is not None:
+        try:
+            output_dev = int(output_device)
+        except (ValueError, TypeError):
+            output_dev = None
+    
+    sounddevice_backend = SoundDeviceBackend(input_dev, output_dev)
     if sounddevice_backend.is_available():
         logger.info("Using SoundDevice audio backend")
         return sounddevice_backend

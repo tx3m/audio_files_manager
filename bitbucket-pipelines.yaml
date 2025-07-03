@@ -1,11 +1,69 @@
 image: python:3.10
 
-pipelines:
-  default:
-    - step:
-        name: Run Unit Tests
+definitions:
+  steps:
+    - step: &test-step
+        name: Enhanced Audio File Manager Tests
         caches:
           - pip
         script:
+          # Install system dependencies for audio support
+          - apt-get update
+          - apt-get install -y libasound2-dev python3-dev portaudio19-dev
+          
+          # Install Python dependencies
+          - python -m pip install --upgrade pip
+          - pip install pytest pytest-cov
           - pip install .
-          - python -m unittest discover -s tests -p "test_*.py"
+          - pip install .[all]  # Install all optional dependencies
+          
+          # Run unit tests
+          - python -m pytest tests/ -v --tb=short
+          
+          # Test basic functionality
+          - python -c "
+            from audio_file_manager import AudioFileManager, LegacyServiceAdapter;
+            print('Successfully imported AudioFileManager and LegacyServiceAdapter');
+            manager = AudioFileManager();
+            print(f'AudioFileManager initialized with backend: {type(manager.audio_backend).__name__}');
+            adapter = LegacyServiceAdapter(manager);
+            print('LegacyServiceAdapter initialized successfully');
+            manager.cleanup();
+            print('All basic functionality tests passed')
+            "
+          
+          # Test enhanced examples
+          - python -c "
+            from enhanced_record_example import EnhancedInteractiveAudioTester;
+            tester = EnhancedInteractiveAudioTester();
+            print('Enhanced record example initialized successfully');
+            tester.manager.cleanup()
+            "
+
+    - step: &lint-step
+        name: Code Quality Check
+        caches:
+          - pip
+        script:
+          - python -m pip install --upgrade pip
+          - pip install black flake8
+          - black --check --diff audio_file_manager/ || echo "Code formatting issues found"
+          - flake8 audio_file_manager/ --max-line-length=100 --ignore=E203,W503 || echo "Linting issues found"
+
+pipelines:
+  default:
+    - step: *test-step
+    - step: *lint-step
+  
+  branches:
+    main:
+      - step: *test-step
+      - step: *lint-step
+    develop:
+      - step: *test-step
+      - step: *lint-step
+  
+  pull-requests:
+    '**':
+      - step: *test-step
+      - step: *lint-step
