@@ -68,7 +68,7 @@ class TestMockAudioBackend(unittest.TestCase):
         info = self.backend.get_device_info()
         
         self.assertIsInstance(info, dict)
-        self.assertEqual(info['device'], 'mock')
+        self.assertEqual(info['input_device'], 'mock')
         self.assertEqual(info['backend'], 'Mock')
         self.assertTrue(info['available'])
 
@@ -283,8 +283,8 @@ class TestSoundDeviceBackend(unittest.TestCase):
             info = backend.get_device_info()
             
             self.assertIsInstance(info, dict)
-            self.assertEqual(info['name'], 'Test Device')
-            self.assertEqual(info['channels'], 2)
+            self.assertEqual(info['input_device']['name'], 'Test Device')
+            self.assertEqual(info['input_device']['channels'], 2)
 
 
 class TestGetAudioBackend(unittest.TestCase):
@@ -302,7 +302,7 @@ class TestGetAudioBackend(unittest.TestCase):
         backend = get_audio_backend()
         
         self.assertEqual(backend, mock_alsa_instance)
-        mock_alsa_class.assert_called_with("default")
+        mock_alsa_class.assert_called_with("default", "default")
     
     @patch('audio_file_manager.backends.platform')
     @patch('audio_file_manager.backends.ALSABackend')
@@ -371,7 +371,7 @@ class TestGetAudioBackend(unittest.TestCase):
         
         backend = get_audio_backend("custom_device")
         
-        mock_alsa_class.assert_called_with("custom_device")
+        mock_alsa_class.assert_called_with("custom_device", "default")
 
 
 if __name__ == '__main__':
