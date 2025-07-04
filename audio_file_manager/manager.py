@@ -1,244 +1,195 @@
-import json
-import time
 import logging
+import time
 import wave
-import shutil
-import subprocess
-import os
 from pathlib import Path
 from datetime import datetime
-import tempfile
 from threading import Event, Thread
 from typing import Any, Dict, Optional, Union, Callable, Set
+
 from .backends import get_audio_backend, AudioBackend
+from .metadata_manager import MetadataManager
+from .file_system_manager import FileSystemManager
+from .config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class AudioFileManager:
     """
-    Enhanced AudioFileManager with legacy functionality and OS abstraction.
-
-    Features:
-    - Cross-platform audio recording and playback
-    - Message type management (away_message, custom_message, etc.)
-    - File ID management with occupied tracking
-    - Audio format conversion (PCM, A-law, u-law)
-    - Threading support for background operations
-    - Sound level monitoring
-    - Read-only protection and default file management
+    Manages audio recording and playback, coordinating backend, metadata, and file system operations.
     """
-
-    MAX_FILES_PER_TYPE = set([str(i) for i in range(1, 5)])  # Legacy compatibility
 
     def __init__(self,
                  storage_dir: Optional[Union[str, Path]] = None,
                  metadata_file: Optional[Union[str, Path]] = None,
-                 num_buttons: int = 16,
-                 input_device: Optional[str] = None,
-                 output_device: Optional[str] = None,
-                 audio_device: Optional[str] = None,  # Deprecated, for backward compatibility
-                 sample_rate: int = 44100,
-                 channels: int = 1,
-                 audio_format: str = "pcm",  # pcm, alaw, ulaw
-                 period_size: int = 1024,
-                 message_type: str = "custom_message"):
+                 config: Config = Config()):
 
-        # Directory setup
-        if storage_dir is None:
-            base_dir = Path.home() / ".audio_files_manager"
-            storage_dir = base_dir / "storage"
-            if metadata_file is None:
-                metadata_file = base_dir / "metadata.json"
-
-        self.storage_dir = Path(storage_dir)
-        self.metadata_file = Path(metadata_file) if metadata_file else self.storage_dir.parent / "metadata.json"
-        self._temp_dir_obj = tempfile.TemporaryDirectory(prefix="audio_staging_")
-        self.temp_dir = Path(self._temp_dir_obj.name)
+        # Initialize managers
+        self.fs_manager = FileSystemManager(Path(storage_dir) if storage_dir else None)
+        
+        if metadata_file is None:
+            metadata_path = self.fs_manager.get_storage_dir().parent / "metadata.json"
+        else:
+            metadata_path = Path(metadata_file)
+            
+        self.metadata_manager = MetadataManager(metadata_path)
 
         # Audio configuration
-        self.num_buttons = num_buttons
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.audio_format = audio_format.lower()
-        self.period_size = period_size
-        self.message_type = message_type
+        self.config = config
+        self.num_buttons = config.num_buttons
+        self.message_type = config.message_type
 
-        # Handle backward compatibility for audio_device parameter
-        if audio_device is not None and (input_device is None and output_device is None):
-            logger.warning("audio_device parameter is deprecated. Use input_device and output_device instead.")
-            input_device = audio_device
-            output_device = audio_device
+        # Device parameter handling
+        input_device = config.input_device
+        output_device = config.output_device
+        if config.input_device or config.output_device:
+            if config.audio_device:
+                logger.warning("Both new (input/output_device) and old (audio_device) parameters provided. "
+                               "Ignoring audio_device.")
+        elif config.audio_device:
+            logger.warning("audio_device is deprecated. Use input_device and output_device instead.")
+            input_device = config.audio_device
+            output_device = config.audio_device
 
-        # Initialize audio backend
         self.audio_backend: AudioBackend = get_audio_backend(input_device, output_device)
 
-        # Legacy compatibility - occupied message tracking
-        self.occupied_away_messages: Set[str] = set()
-        self.occupied_custom_messages: Set[str] = set()
-
-        # Threading support
-        self._exit_flag = False
+        # Threading and state
         self._recording_thread: Optional[Thread] = None
         self._sound_level_callback: Optional[Callable] = None
-
-        # Current recording state
-        self.current_file: Dict[str, Any] = { }
+        self.current_file: Dict[str, Any] = {}
         self.is_recording = False
 
-        # Initialize storage
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata: Dict[str, Dict[str, Any]] = self._load_metadata()
-        self._load_occupied_sets()
-
         logger.info(
-            f"AudioFileManager initialized. Storage: {self.storage_dir}, Backend: {type(self.audio_backend).__name__}")
-
-    def _load_metadata(self) -> Dict[str, Dict[str, Any]]:
-        """Load metadata from file."""
-        if self.metadata_file.exists():
-            logger.debug(f"Loading metadata from {self.metadata_file}")
-            with open(self.metadata_file, 'r') as f:
-                return json.load(f)
-        return { }
-
-    def _save_metadata(self):
-        """Save metadata to file."""
-        with open(self.metadata_file, 'w') as f:
-            logger.debug(f"Saving metadata to {self.metadata_file}")
-            json.dump(self.metadata, f, indent=4)
-
-    def _load_occupied_sets(self):
-        """Load occupied message IDs from metadata for legacy compatibility."""
-        for button_id, meta in self.metadata.items():
-            message_type = meta.get('message_type', '')
-            if message_type == 'away_message':
-                self.occupied_away_messages.add(button_id)
-            elif message_type == 'custom_message':
-                self.occupied_custom_messages.add(button_id)
+            f"AudioFileManager initialized. Storage: {self.fs_manager.get_storage_dir()}, "
+            f"Backend: {type(self.audio_backend).__name__}"
+        )
 
     def set_sound_level_callback(self, callback: Callable[[int], None]):
-        """Set callback for sound level monitoring during recording."""
+        """
+        Set a callback function to receive sound level updates during recording.
+
+        Args:
+            callback: A function that takes an integer (sound level) as an argument.
+        """
         self._sound_level_callback = callback
 
     def get_new_file_id(self, message_type: str) -> Optional[str]:
         """
-        Get an available file ID for the given message type.
-        Legacy compatibility method.
+        Get an available file ID for a given message type.
+
+        Args:
+            message_type: The type of message (e.g., "away_message", "custom_message").
+
+        Returns:
+            An available file ID as a string, or None if no ID is available.
         """
-        if message_type == "away_message":
-            available_ids = self.MAX_FILES_PER_TYPE - self.occupied_away_messages
-        elif message_type == "custom_message":
-            available_ids = self.MAX_FILES_PER_TYPE - self.occupied_custom_messages
-        else:
-            # For other message types, use button IDs
-            occupied = set(self.metadata.keys())
-            available_ids = set(str(i) for i in range(1, self.num_buttons + 1)) - occupied
+        occupied_ids = {
+            button_id for button_id, meta in self.metadata_manager.get_all().items()
+            if meta.get('message_type') == message_type
+        }
+        
+        all_possible_ids = set(str(i) for i in range(1, self.num_buttons + 1))
+        available_ids = all_possible_ids - occupied_ids
 
         if not available_ids:
-            logger.warning(f"No available IDs for {message_type}, will overwrite")
-            if message_type == "away_message":
-                self.occupied_away_messages.clear()
-                available_ids = self.MAX_FILES_PER_TYPE
-            elif message_type == "custom_message":
-                self.occupied_custom_messages.clear()
-                available_ids = self.MAX_FILES_PER_TYPE
-            else:
-                return None
+            logger.warning(f"No available IDs for {message_type}, will overwrite the oldest.")
+            # Find the oldest message of this type to overwrite
+            oldest_message = None
+            oldest_timestamp = float('inf')
+            for button_id, meta in self.metadata_manager.get_all().items():
+                if meta.get('message_type') == message_type:
+                    try:
+                        timestamp = datetime.strptime(meta.get("timestamp"), "%Y-%m-%d %H:%M:%S").timestamp()
+                        if timestamp < oldest_timestamp:
+                            oldest_timestamp = timestamp
+                            oldest_message = button_id
+                    except (ValueError, TypeError):
+                        continue # Skip if timestamp is invalid
 
+            if oldest_message:
+                logger.info(f"Overwriting oldest message: {oldest_message}")
+                return oldest_message
+            else:
+                # If no existing messages of this type, just return the first ID
+                return "1" # Fallback to 1 if no existing messages to overwrite
         return min(available_ids)
 
     def record_audio_to_temp(self, button_id: Union[str, int], stop_event: Event,
                              channels: Optional[int] = None, rate: Optional[int] = None) -> Dict[str, Any]:
         """
-        Records audio from the system microphone to a temporary WAV file until the provided stop_event is triggered.
-        Enhanced version with sound level monitoring and backend abstraction.
+        Record audio to a temporary file.
+
+        Args:
+            button_id: The ID of the button associated with the recording.
+            stop_event: An event to signal when to stop recording.
+            channels: The number of audio channels.
+            rate: The sample rate.
+
+        Returns:
+            A dictionary containing information about the recorded file.
         """
         button_id = str(button_id)
-        channels = channels or self.channels
-        rate = rate or self.sample_rate
+        channels = channels or self.config.channels
+        rate = rate or self.config.sample_rate
 
         keyword = self.message_type.lower().replace(" ", "_")
         filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
-        temp_path = self.temp_dir / filename
+        temp_path = self.fs_manager.get_temp_dir() / filename
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Record audio using the backend
         pcm_bytes = self.audio_backend.record_audio(
-            stop_event=stop_event,
-            channels=channels,
-            rate=rate,
-            period_size=self.period_size,
-            sound_level_callback=self._sound_level_callback
+            stop_event=stop_event, channels=channels, rate=rate,
+            period_size=self.config.period_size, sound_level_callback=self._sound_level_callback
         )
 
-        # Calculate duration
-        sample_width_bytes = 2  # S16_LE format
-        duration = len(pcm_bytes) / (rate * channels * sample_width_bytes)
+        duration = len(pcm_bytes) / (rate * channels * 2)  # 2 bytes for S16_LE
 
-        # Write to WAV file
         with wave.open(str(temp_path), 'wb') as wf:
             wf.setnchannels(channels)
-            wf.setsampwidth(sample_width_bytes)
+            wf.setsampwidth(2)
             wf.setframerate(rate)
             wf.writeframes(pcm_bytes)
 
         return {
-            "button_id":    button_id,
-            "message_type": self.message_type,
-            "duration":     round(duration, 2),
-            "temp_path":    str(temp_path),
-            "timestamp":    timestamp,
-            "channels":     channels,
-            "sample_rate":  rate,
-            "audio_format": "wav"
+            "button_id": button_id, "message_type": self.message_type,
+            "duration": round(duration, 2), "temp_path": str(temp_path),
+            "timestamp": timestamp, "channels": channels,
+            "sample_rate": rate, "audio_format": "wav"
         }
 
-    def start_recording(self, button_id: Union[str, int],
-                        stop_callback: Optional[Callable] = None) -> bool:
+    def start_recording(self, button_id: Union[str, int], stop_callback: Optional[Callable] = None) -> bool:
         """
-        Start recording in a separate thread managed by the AudioFileManager.
+        Start recording audio in a separate thread.
 
         Args:
-            button_id: ID of the button/slot for this recording
-            stop_callback: Optional callback to call when recording completes
+            button_id: The ID of the button associated with the recording.
+            stop_callback: A function to call when recording is complete.
 
         Returns:
-            bool: True if recording started successfully, False if already recording
+            True if recording started successfully, False otherwise.
         """
         if self.is_recording:
             logger.warning("Recording already in progress")
             return False
 
-        self._exit_flag = False
         self._stop_event = Event()
 
         def record_worker():
+            self.is_recording = True
             try:
-                self.is_recording = True
                 logger.info(f"Starting recording for button {button_id}, type {self.message_type}")
-
-                self.current_file = self.record_audio_to_temp(
-                    button_id=button_id,
-                    stop_event=self._stop_event
-                )
-
+                self.current_file = self.record_audio_to_temp(button_id, self._stop_event)
                 logger.info(f"Recording completed: {self.current_file}")
-
             except Exception as e:
                 logger.error(f"Recording failed: {e}")
-                self.current_file = None
+                self.current_file = {}
             finally:
                 self.is_recording = False
                 if stop_callback:
-                    try:
-                        stop_callback()
-                    except Exception as e:
-                        logger.error(f"Stop callback failed: {e}")
+                    stop_callback()
 
         self._recording_thread = Thread(target=record_worker, daemon=True, name="AudioRecord")
         self._recording_thread.start()
-
         return True
 
     def stop_recording(self) -> bool:
@@ -246,24 +197,21 @@ class AudioFileManager:
         Stop the current recording.
 
         Returns:
-            bool: True if recording was stopped, False if no recording was active
+            True if recording was stopped successfully, False otherwise.
         """
         if not self.is_recording:
             logger.warning("No recording in progress to stop")
             return False
 
-        if hasattr(self, '_stop_event') and self._stop_event:
+        if hasattr(self, '_stop_event'):
             self._stop_event.set()
 
-        self._exit_flag = True
-
-        # Wait for recording thread to complete
-        if hasattr(self, '_recording_thread') and self._recording_thread:
+        if self._recording_thread:
             self._recording_thread.join(timeout=5.0)
             if self._recording_thread.is_alive():
                 logger.warning("Recording thread did not stop within timeout")
                 return False
-
+        
         logger.info("Recording stopped successfully")
         return True
 
@@ -272,269 +220,145 @@ class AudioFileManager:
         Check if a recording is currently active.
 
         Returns:
-            bool: True if recording is active, False otherwise
+            True if recording is active, False otherwise.
         """
         return self.is_recording
 
     def get_current_recording_info(self) -> Optional[Dict[str, Any]]:
         """
-        Get information about the current recording in progress.
+        Get information about the current recording.
 
         Returns:
-            dict or None: Recording info if available, None if no recording
+            A dictionary containing recording info, or None if not recording.
         """
-        if self.is_recording and hasattr(self, 'current_file'):
-            return self.current_file.copy() if self.current_file else None
-        return None
+        return self.current_file if self.is_recording else None
 
-    def play_audio(self, file_path_or_button_id: Union[str, Path, int]) -> bool:
+    def play_audio(self, file_path_or_button_id: Union[str, Path, int], blocking: bool = True) -> bool:
         """
-        Plays the audio for the given button_id or from the specified file path.
-
-        This method provides two ways to play audio:
-        1. By button_id: Pass the button ID as a string or integer, and the method will look up
-           the associated audio file in the metadata and play it.
-        2. By file path: Pass a file path (string or Path object), and the method will play
-           the audio file directly.
+        Play an audio file by path or button ID.
 
         Args:
-            file_path_or_button_id: Either a button_id or a file path to play
+            file_path_or_button_id: The path to the audio file or the ID of the button.
+            blocking: If True, wait for playback to complete.
 
         Returns:
-            bool: True if playback was successful, False otherwise
-
-        Examples:
-            # Play by button ID
-            manager.play_audio("button1")
-
-            # Play by file path
-            manager.play_audio("/path/to/audio.wav")
+            True if playback was successful, False otherwise.
         """
-        # Check if input is a button_id
-        if isinstance(file_path_or_button_id, (str, int)) and not os.path.exists(str(file_path_or_button_id)):
-            button_id = str(file_path_or_button_id)
-            button_info = self.get_recording_info(button_id)
-
-            if not button_info:
-                logger.error(f"Cannot play audio: no recording found for button {button_id}")
+        file_path = None
+        if isinstance(file_path_or_button_id, (str, int)) and not Path(str(file_path_or_button_id)).exists():
+            button_info = self.metadata_manager.get(str(file_path_or_button_id))
+            if not button_info or "path" not in button_info:
+                logger.error(f"No recording found for button {file_path_or_button_id}")
                 return False
-
-            file_path = button_info.get("path")
-            if not file_path:
-                logger.error(f"Cannot play audio: no file path in metadata for button {button_id}")
-                return False
+            file_path = Path(button_info["path"])
         else:
-            # Input is a file path
-            file_path = file_path_or_button_id
+            file_path = Path(file_path_or_button_id)
 
-        path = Path(file_path)
-        if not path.exists():
-            logger.error(f"Cannot play audio: file not found at {path}")
+        if not file_path.exists():
+            logger.error(f"Audio file not found at {file_path}")
             return False
 
         try:
-            with wave.open(str(path), 'rb') as wf:
-                samplerate = wf.getframerate()
-                channels = wf.getnchannels()
-                n_frames = wf.getnframes()
-                audio_bytes = wf.readframes(n_frames)
-
-            logger.info(f"Playing audio from {path}...")
-            self.audio_backend.play_audio(audio_bytes, channels, samplerate)
-            logger.info("Playback finished.")
+            self.audio_backend.play_from_file(str(file_path), blocking=blocking)
             return True
         except Exception as e:
-            logger.error(f"Failed to play audio file {path}: {e}")
+            logger.error(f"Failed to play audio file {file_path}: {e}")
             return False
 
-    def finalize_recording(self, temp_path_info: Dict[str, Any]) -> None:
+    def finalize_recording(self, temp_path_info: Dict[str, Any]):
         """
         Finalize a recording by moving it to permanent storage and updating metadata.
-        Enhanced with format conversion support.
+
+        Args:
+            temp_path_info: A dictionary containing information about the temporary file.
         """
         button_id = str(temp_path_info["button_id"])
-        if self.metadata.get(button_id, { }).get('read_only'):
+        if self.metadata_manager.get(button_id) and self.metadata_manager.get(button_id).get('read_only'):
             logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
             return
 
         temp_path = Path(temp_path_info["temp_path"])
-        message_type = temp_path_info["message_type"]
+        final_name = temp_path.name
+        final_path = self.fs_manager.get_storage_dir() / final_name
 
-        # Generate final filename
-        if self.audio_format in ['alaw', 'ulaw']:
-            final_name = temp_path.stem + f"_{self.audio_format}.wav"
+        if self.config.audio_format in ['alaw', 'ulaw']:
+            converted_name = temp_path.stem + f"_{self.config.audio_format}.wav"
+            converted_path = self.fs_manager.get_storage_dir() / converted_name
+            if self.fs_manager.convert_audio_format(temp_path, converted_path, self.config.audio_format,
+                                                   temp_path_info["sample_rate"], temp_path_info["channels"]):
+                final_path = converted_path
+            else:
+                logger.error("Audio conversion failed, using original format")
+                self.fs_manager.move_to_storage(temp_path, final_name)
         else:
-            final_name = temp_path.name
-
-        final_path = self.storage_dir / final_name
-
-        # Convert audio format if needed
-        if self.audio_format in ['alaw', 'ulaw']:
-            success = self._convert_audio_format(temp_path, final_path, self.audio_format)
-            if not success:
-                logger.error(f"Audio conversion failed, using original format")
-                shutil.move(temp_path, final_path)
-        else:
-            shutil.move(temp_path, final_path)
+            self.fs_manager.move_to_storage(temp_path, final_name)
 
         logger.info(f"Finalized recording for button '{button_id}' to {final_path}")
 
-        # Update occupied sets for legacy compatibility
-        if message_type == "away_message":
-            self.occupied_away_messages.add(button_id)
-        elif message_type == "custom_message":
-            self.occupied_custom_messages.add(button_id)
+        
 
-        # Update metadata
-        self.metadata[button_id] = {
-            "name":         final_path.name,
-            "duration":     temp_path_info["duration"],
-            "path":         str(final_path),
-            "timestamp":    temp_path_info["timestamp"],
-            "message_type": message_type,
-            "audio_format": self.audio_format,
-            "sample_rate":  temp_path_info.get("sample_rate", self.sample_rate),
-            "channels":     temp_path_info.get("channels", self.channels),
-            "read_only":    False,
-            "is_default":   False
-        }
-        self._save_metadata()
+        self.metadata_manager.update_recording(button_id, {
+            "name": final_path.name, "duration": temp_path_info["duration"],
+            "path": str(final_path), "timestamp": temp_path_info["timestamp"],
+            "message_type": temp_path_info["message_type"], "audio_format": self.config.audio_format,
+            "sample_rate": temp_path_info["sample_rate"], "channels": temp_path_info["channels"],
+            "read_only": False, "is_default": False
+        })
 
-    def _convert_audio_format(self, input_path: Path, output_path: Path, target_format: str) -> bool:
-        """
-        Convert audio format using FFmpeg. Legacy compatibility method.
-        """
-        if target_format == "alaw":
-            codec_out = "pcm_alaw"
-        elif target_format == "ulaw":
-            codec_out = "pcm_mulaw"
-        else:
-            return False
-
-        command = [
-            "ffmpeg", "-y",  # overwrite output
-            "-i", str(input_path),
-            "-c:a", codec_out,
-            "-ar", str(self.sample_rate),
-            "-ac", str(self.channels),
-            str(output_path)
-        ]
-
-        try:
-            process = subprocess.run(command, capture_output=True, timeout=10, text=True)
-            if process.returncode == 0:
-                logger.info(f"Successfully converted {input_path} to {target_format}")
-                return True
-            else:
-                logger.error(f"FFmpeg conversion failed: {process.stderr}")
-                return False
-        except subprocess.TimeoutExpired:
-            logger.error("FFmpeg conversion timed out")
-            return False
-        except FileNotFoundError:
-            logger.error("FFmpeg not found. Install FFmpeg for audio format conversion.")
-            return False
-
-    def cleanup(self) -> None:
-        """Cleanup resources and stop any running operations."""
-        self._exit_flag = True
+    def cleanup(self):
+        """Clean up resources and stop any running operations."""
         if self._recording_thread and self._recording_thread.is_alive():
+            self._stop_event.set()
             self._recording_thread.join(timeout=1.0)
-        self._temp_dir_obj.cleanup()
+        self.fs_manager.cleanup()
 
-    def discard_recording(self, button_id: Union[str, int]) -> None:
-        """Remove temporary files for the given button ID."""
-        button_id = str(button_id)
-        for f in self.temp_dir.glob(f"{button_id}_*.wav"):
+    def discard_recording(self, button_id: Union[str, int]):
+        """
+        Discard a temporary recording.
+
+        Args:
+            button_id: The ID of the button associated with the recording.
+        """
+        for f in self.fs_manager.get_temp_dir().glob(f"{button_id}_*.wav"):
             f.unlink()
 
-    def set_read_only(self, button_id: Union[str, int], read_only: bool = True) -> None:
-        """Set read-only flag for a button."""
-        button_id = str(button_id)
-        if button_id not in self.metadata:
-            return
-        self.metadata[button_id]['read_only'] = read_only
-        self._save_metadata()
+    def set_read_only(self, button_id: Union[str, int], read_only: bool = True):
+        """
+        Set the read-only status for a recording.
+
+        Args:
+            button_id: The ID of the button associated with the recording.
+            read_only: True to make the recording read-only, False otherwise.
+        """
+        self.metadata_manager.set_read_only(str(button_id), read_only)
 
     def get_recording_info(self, button_id: Union[str, int]) -> Optional[Dict[str, Any]]:
-        """Get recording information for a button."""
-        return self.metadata.get(str(button_id))
+        """
+        Get information about a specific recording.
+
+        Args:
+            button_id: The ID of the button associated with the recording.
+
+        Returns:
+            A dictionary containing the recording's metadata, or None if not found.
+        """
+        return self.metadata_manager.get(str(button_id))
 
     def list_all_recordings(self) -> Dict[str, Dict[str, Any]]:
-        """Get all recording metadata."""
-        return self.metadata
+        """
+        List all recordings.
 
-    def assign_default(self, button_id: Union[str, int], file_path: Union[str, Path]) -> None:
-        """Assign a default audio file to a button."""
-        button_id = str(button_id)
-        if not Path(file_path).exists():
-            logger.error(f"Cannot assign default: source file not found at {file_path}")
-            return
-
-        default_name = f"default_{button_id}.wav"
-        default_path = self.storage_dir / default_name
-        shutil.copy(file_path, default_path)
-
-        duration = None
-        try:
-            with wave.open(str(default_path), 'rb') as wf:
-                duration = round(wf.getnframes() / float(wf.getframerate()), 2)
-        except wave.Error:
-            logger.warning(f"Could not read duration from {default_path}. Duration set to None.")
-
-        self.metadata[button_id] = {
-            "name":         default_name,
-            "duration":     duration,
-            "path":         str(default_path),
-            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "message_type": "default",
-            "audio_format": "wav",
-            "read_only":    True,
-            "is_default":   True
-        }
-        self._save_metadata()
-
-    def restore_default(self, button_id: Union[str, int]) -> None:
-        """Restore a button to its default audio file."""
-        button_id = str(button_id)
-        default_path = self.storage_dir / f"default_{button_id}.wav"
-        if not default_path.exists():
-            logger.warning(f"Cannot restore default for '{button_id}': default file not found.")
-            return
-
-        restored_path = self.storage_dir / f"{button_id}_restored_{int(time.time())}.wav"
-        shutil.copy(default_path, restored_path)
-
-        duration = None
-        try:
-            with wave.open(str(restored_path), 'rb') as wf:
-                duration = round(wf.getnframes() / float(wf.getframerate()), 2)
-        except wave.Error:
-            logger.warning(f"Could not read duration from restored file {restored_path}. Duration set to None.")
-
-        self.metadata[button_id] = {
-            "name":         restored_path.name,
-            "duration":     duration,
-            "path":         str(restored_path),
-            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "message_type": "restored_default",
-            "audio_format": "wav",
-            "read_only":    False,
-            "is_default":   False
-        }
-        self._save_metadata()
+        Returns:
+            A dictionary containing metadata for all recordings.
+        """
+        return self.metadata_manager.get_all()
 
     def get_audio_device_info(self) -> Dict[str, Any]:
-        """Get information about the current audio device."""
+        """
+        Get information about the current audio device.
+
+        Returns:
+            A dictionary containing device information.
+        """
         return self.audio_backend.get_device_info()
-
-    def update_json_backup(self, message_type: str = ""):
-        """Legacy compatibility method for JSON backup updates."""
-        logger.info("JSON backup updated via metadata save")
-        self._save_metadata()
-
-    @staticmethod
-    def create_timestamp() -> str:
-        """Create a timestamp string. Legacy compatibility method."""
-        return str(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 

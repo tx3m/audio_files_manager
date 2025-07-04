@@ -35,16 +35,31 @@ class EnhancedInteractiveAudioTester:
     def __init__(self):
         self.log = logging.getLogger("EnhancedRecordExample")
         
-        # Initialize with enhanced features and separate audio devices
-        self.manager = AudioFileManager(
-            # Specify separate input and output devices
-            input_device="default",   # Device used for recording
-            output_device="default",  # Device used for playback
+        # Initialize with enhanced features using Config
+        from audio_file_manager.config import Config
+        
+        # Try to detect available audio devices, fallback to None for auto-detection
+        input_device = None   # Let the backend auto-detect
+        output_device = None  # Let the backend auto-detect
+        
+        config = Config(
+            input_device=input_device,   # Device used for recording
+            output_device=output_device,  # Device used for playback
             num_buttons=10,
             audio_format="pcm",  # Can be changed to "alaw" or "ulaw"
             sample_rate=44100,   # Can be changed to 8000 for legacy compatibility
-            channels=1
+            channels=1,
+            message_type="away_message"
         )
+        
+        self.manager = AudioFileManager(config=config)
+        
+        # Log available device information
+        try:
+            device_info = self.manager.get_audio_device_info()
+            self.log.info(f"Audio device info: {device_info}")
+        except Exception as e:
+            self.log.warning(f"Could not get device info: {e}")
         
         # Set up sound level monitoring
         self.sound_levels = []
@@ -53,7 +68,7 @@ class EnhancedInteractiveAudioTester:
         # Initialize legacy adapter for demonstration
         self.legacy_adapter = LegacyServiceAdapter(
             audio_manager=self.manager,
-            message_path=str(self.manager.storage_dir)
+            message_path=str(self.manager.fs_manager.get_storage_dir())
         )
         
         # --- State Variables ---
@@ -83,9 +98,10 @@ class EnhancedInteractiveAudioTester:
             # Configuration
             "button": self._handle_button,
             "type": self._handle_type,
-            "format": self._handle_format,
-            "rate": self._handle_rate,
-            "status": self._handle_status,
+            'format': self._handle_format,
+            'rate': self._handle_rate,
+            'devices': self._handle_devices,
+            'status': self._handle_status,
             
             # Legacy compatibility
             "legacy": self._handle_legacy,
@@ -128,6 +144,7 @@ class EnhancedInteractiveAudioTester:
         print("  type     - Set message type")
         print("  format   - Set audio format (pcm/alaw/ulaw)")
         print("  rate     - Set sample rate")
+        print("  devices  - List and select audio devices")
         print("  status   - Show current configuration")
         
         print("\nLEGACY COMPATIBILITY:")
@@ -149,12 +166,13 @@ class EnhancedInteractiveAudioTester:
         print(f"\nCurrent Configuration:")
         print(f"  Button ID: {self.current_button}")
         print(f"  Message Type: {self.current_message_type}")
-        print(f"  Audio Format: {self.manager.audio_format}")
-        print(f"  Sample Rate: {self.manager.sample_rate} Hz")
-        print(f"  Channels: {self.manager.channels}")
+        print(f"  Audio Format: {self.manager.config.audio_format}")
+        print(f"  Sample Rate: {self.manager.config.sample_rate} Hz")
+        print(f"  Channels: {self.manager.config.channels}")
         print(f"  Audio Backend: {backend_name}")
-        print(f"  Storage: {self.manager.storage_dir}")
+        print(f"  Storage: {self.manager.fs_manager.get_storage_dir()}")
         print(f"  Device Info: {device_info.get('device', 'N/A')}")
+        print(f"  Recording Active: {self.manager.is_recording_active()}")
     
     def _recording_completed_callback(self):
         """Callback when recording is completed."""
@@ -177,18 +195,33 @@ class EnhancedInteractiveAudioTester:
         self.sound_levels.clear()
         self.temp_info = None
         
-        # Start recording using the encapsulated method
-        success = self.manager.start_recording(
-            button_id=self.current_button,
-            message_type=self.current_message_type,
-            stop_callback=self._recording_completed_callback
-        )
+        # Set message type on manager before recording
+        self.manager.message_type = self.current_message_type
         
-        if success:
-            self.log.info(f"Recording started for button {self.current_button}")
-            print("\n")  # New line for VU meter
-        else:
-            self.log.error("Failed to start recording")
+        # Start recording using the encapsulated method
+        try:
+            success = self.manager.start_recording(
+                button_id=self.current_button,
+                stop_callback=self._recording_completed_callback
+            )
+            
+            if success:
+                self.log.info(f"Recording started for button {self.current_button}")
+                print("\n")  # New line for VU meter
+            else:
+                self.log.error("Failed to start recording")
+                print("\nTroubleshooting tips:")
+                print("- Use 'devices' command to check audio device status")
+                print("- Make sure your microphone is connected and enabled")
+                print("- Try running as administrator (Windows)")
+                
+        except Exception as e:
+            self.log.error(f"Recording failed to start: {e}")
+            print("\nTroubleshooting tips:")
+            print("- Use 'devices' command to check audio device status")
+            print("- Make sure your microphone is connected and enabled")
+            print("- Check if another application is using the microphone")
+            print("- Try running as administrator (Windows)")
     
     def _handle_stop(self):
         """Stop recording."""
@@ -305,9 +338,9 @@ class EnhancedInteractiveAudioTester:
         confirm = input(f"Delete recording for button '{self.current_button}'? (y/N): ")
         if confirm.lower() == 'y':
             try:
+                # Use the metadata manager to delete the recording
                 Path(info['path']).unlink()
-                del self.manager.metadata[self.current_button]
-                self.manager._save_metadata()
+                self.manager.metadata_manager.delete_recording(self.current_button)
                 print(f"Recording for button '{self.current_button}' deleted.")
             except Exception as e:
                 self.log.error(f"Failed to delete recording: {e}")
@@ -331,7 +364,19 @@ class EnhancedInteractiveAudioTester:
             return
         
         try:
-            self.manager.assign_default(self.current_button, file_path)
+            # Copy the file to storage and mark as default
+            from shutil import copy2
+            dest_path = self.manager.fs_manager.get_storage_dir() / f"default_{self.current_button}.wav"
+            copy2(file_path, dest_path)
+            
+            # Update metadata to mark as default
+            self.manager.metadata_manager.update_recording(self.current_button, {
+                "name": dest_path.name,
+                "path": str(dest_path),
+                "is_default": True,
+                "message_type": self.current_message_type,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            })
             print(f"Default recording set for button '{self.current_button}'")
         except Exception as e:
             self.log.error(f"Failed to set default: {e}")
@@ -339,8 +384,11 @@ class EnhancedInteractiveAudioTester:
     def _handle_restore(self):
         """Restore default recording."""
         try:
-            self.manager.restore_default(self.current_button)
-            print(f"Default recording restored for button '{self.current_button}'")
+            info = self.manager.get_recording_info(self.current_button)
+            if info and info.get('is_default'):
+                print(f"Button '{self.current_button}' already has default recording")
+            else:
+                print(f"No default recording available for button '{self.current_button}'")
         except Exception as e:
             self.log.error(f"Failed to restore default: {e}")
     
@@ -364,7 +412,7 @@ class EnhancedInteractiveAudioTester:
         print("Available formats: pcm, alaw, ulaw")
         audio_format = input("Enter audio format: ").strip().lower()
         if audio_format in ["pcm", "alaw", "ulaw"]:
-            self.manager.audio_format = audio_format
+            self.manager.config.audio_format = audio_format
             print(f"Audio format set to: {audio_format}")
         else:
             print("Invalid format. Use: pcm, alaw, or ulaw")
@@ -373,10 +421,37 @@ class EnhancedInteractiveAudioTester:
         """Set sample rate."""
         try:
             rate = int(input("Enter sample rate (e.g., 8000, 44100): ").strip())
-            self.manager.sample_rate = rate
+            self.manager.config.sample_rate = rate
             print(f"Sample rate set to: {rate} Hz")
         except ValueError:
             print("Invalid sample rate. Enter a number.")
+    
+    def _handle_devices(self):
+        """List and select audio devices."""
+        try:
+            # Try to get device information from the backend
+            print("\nAudio Device Information:")
+            device_info = self.manager.get_audio_device_info()
+            print(f"Current backend: {type(self.manager.audio_backend).__name__}")
+            print(f"Device info: {device_info}")
+            
+            # Check if we can get available devices
+            if hasattr(self.manager.audio_backend, 'list_devices'):
+                devices = self.manager.audio_backend.list_devices()
+                print(f"\nAvailable devices: {devices}")
+            else:
+                print("\nDevice listing not available for current backend.")
+                print("Try using None for auto-detection or check your system's audio settings.")
+                
+            print("\nNote: If you're getting 'No input device matching' errors:")
+            print("1. Check your system's audio settings")
+            print("2. Make sure your microphone is connected and enabled")
+            print("3. Try running the script as administrator (Windows)")
+            print("4. The current configuration uses auto-detection (None)")
+            
+        except Exception as e:
+            print(f"Error getting device information: {e}")
+            print("This might indicate audio system issues.")
     
     def _handle_status(self):
         """Show current status."""
