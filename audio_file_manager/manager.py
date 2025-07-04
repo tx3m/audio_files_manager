@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class AudioFileManager:
     """
     Enhanced AudioFileManager with legacy functionality and OS abstraction.
-    
+
     Features:
     - Cross-platform audio recording and playback
     - Message type management (away_message, custom_message, etc.)
@@ -28,12 +28,12 @@ class AudioFileManager:
     - Sound level monitoring
     - Read-only protection and default file management
     """
-    
+
     MAX_FILES_PER_TYPE = set([str(i) for i in range(1, 5)])  # Legacy compatibility
-    
-    def __init__(self, 
-                 storage_dir: Optional[Union[str, Path]] = None, 
-                 metadata_file: Optional[Union[str, Path]] = None, 
+
+    def __init__(self,
+                 storage_dir: Optional[Union[str, Path]] = None,
+                 metadata_file: Optional[Union[str, Path]] = None,
                  num_buttons: int = 16,
                  input_device: Optional[str] = None,
                  output_device: Optional[str] = None,
@@ -43,7 +43,7 @@ class AudioFileManager:
                  audio_format: str = "pcm",  # pcm, alaw, ulaw
                  period_size: int = 1024,
                  message_type: str = "custom_message"):
-        
+
         # Directory setup
         if storage_dir is None:
             base_dir = Path.home() / ".audio_files_manager"
@@ -55,7 +55,7 @@ class AudioFileManager:
         self.metadata_file = Path(metadata_file) if metadata_file else self.storage_dir.parent / "metadata.json"
         self._temp_dir_obj = tempfile.TemporaryDirectory(prefix="audio_staging_")
         self.temp_dir = Path(self._temp_dir_obj.name)
-        
+
         # Audio configuration
         self.num_buttons = num_buttons
         self.sample_rate = sample_rate
@@ -63,35 +63,36 @@ class AudioFileManager:
         self.audio_format = audio_format.lower()
         self.period_size = period_size
         self.message_type = message_type
-        
+
         # Handle backward compatibility for audio_device parameter
         if audio_device is not None and (input_device is None and output_device is None):
             logger.warning("audio_device parameter is deprecated. Use input_device and output_device instead.")
             input_device = audio_device
             output_device = audio_device
-        
+
         # Initialize audio backend
         self.audio_backend: AudioBackend = get_audio_backend(input_device, output_device)
-        
+
         # Legacy compatibility - occupied message tracking
         self.occupied_away_messages: Set[str] = set()
         self.occupied_custom_messages: Set[str] = set()
-        
+
         # Threading support
         self._exit_flag = False
         self._recording_thread: Optional[Thread] = None
         self._sound_level_callback: Optional[Callable] = None
-        
+
         # Current recording state
-        self.current_file: Dict[str, Any] = {}
+        self.current_file: Dict[str, Any] = { }
         self.is_recording = False
-        
+
         # Initialize storage
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.metadata: Dict[str, Dict[str, Any]] = self._load_metadata()
         self._load_occupied_sets()
-        
-        logger.info(f"AudioFileManager initialized. Storage: {self.storage_dir}, Backend: {type(self.audio_backend).__name__}")
+
+        logger.info(
+            f"AudioFileManager initialized. Storage: {self.storage_dir}, Backend: {type(self.audio_backend).__name__}")
 
     def _load_metadata(self) -> Dict[str, Dict[str, Any]]:
         """Load metadata from file."""
@@ -99,7 +100,7 @@ class AudioFileManager:
             logger.debug(f"Loading metadata from {self.metadata_file}")
             with open(self.metadata_file, 'r') as f:
                 return json.load(f)
-        return {}
+        return { }
 
     def _save_metadata(self):
         """Save metadata to file."""
@@ -133,7 +134,7 @@ class AudioFileManager:
             # For other message types, use button IDs
             occupied = set(self.metadata.keys())
             available_ids = set(str(i) for i in range(1, self.num_buttons + 1)) - occupied
-        
+
         if not available_ids:
             logger.warning(f"No available IDs for {message_type}, will overwrite")
             if message_type == "away_message":
@@ -144,11 +145,11 @@ class AudioFileManager:
                 available_ids = self.MAX_FILES_PER_TYPE
             else:
                 return None
-        
+
         return min(available_ids)
 
-    def record_audio_to_temp(self, button_id: Union[str, int], stop_event: Event, 
-                           channels: Optional[int] = None, rate: Optional[int] = None) -> Dict[str, Any]:
+    def record_audio_to_temp(self, button_id: Union[str, int], stop_event: Event,
+                             channels: Optional[int] = None, rate: Optional[int] = None) -> Dict[str, Any]:
         """
         Records audio from the system microphone to a temporary WAV file until the provided stop_event is triggered.
         Enhanced version with sound level monitoring and backend abstraction.
@@ -156,12 +157,12 @@ class AudioFileManager:
         button_id = str(button_id)
         channels = channels or self.channels
         rate = rate or self.sample_rate
-        
+
         keyword = self.message_type.lower().replace(" ", "_")
         filename = f"{button_id}_{keyword}_{int(time.time())}.wav"
         temp_path = self.temp_dir / filename
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # Record audio using the backend
         pcm_bytes = self.audio_backend.record_audio(
             stop_event=stop_event,
@@ -170,11 +171,11 @@ class AudioFileManager:
             period_size=self.period_size,
             sound_level_callback=self._sound_level_callback
         )
-        
+
         # Calculate duration
         sample_width_bytes = 2  # S16_LE format
         duration = len(pcm_bytes) / (rate * channels * sample_width_bytes)
-        
+
         # Write to WAV file
         with wave.open(str(temp_path), 'wb') as wf:
             wf.setnchannels(channels)
@@ -183,47 +184,47 @@ class AudioFileManager:
             wf.writeframes(pcm_bytes)
 
         return {
-            "button_id": button_id,
+            "button_id":    button_id,
             "message_type": self.message_type,
-            "duration": round(duration, 2),
-            "temp_path": str(temp_path),
-            "timestamp": timestamp,
-            "channels": channels,
-            "sample_rate": rate,
+            "duration":     round(duration, 2),
+            "temp_path":    str(temp_path),
+            "timestamp":    timestamp,
+            "channels":     channels,
+            "sample_rate":  rate,
             "audio_format": "wav"
         }
 
-    def start_recording(self, button_id: Union[str, int], 
-                       stop_callback: Optional[Callable] = None) -> bool:
+    def start_recording(self, button_id: Union[str, int],
+                        stop_callback: Optional[Callable] = None) -> bool:
         """
         Start recording in a separate thread managed by the AudioFileManager.
-        
+
         Args:
             button_id: ID of the button/slot for this recording
             stop_callback: Optional callback to call when recording completes
-            
+
         Returns:
             bool: True if recording started successfully, False if already recording
         """
         if self.is_recording:
             logger.warning("Recording already in progress")
             return False
-        
+
         self._exit_flag = False
         self._stop_event = Event()
-        
+
         def record_worker():
             try:
                 self.is_recording = True
                 logger.info(f"Starting recording for button {button_id}, type {self.message_type}")
-                
+
                 self.current_file = self.record_audio_to_temp(
-                    button_id=button_id, 
+                    button_id=button_id,
                     stop_event=self._stop_event
                 )
-                
+
                 logger.info(f"Recording completed: {self.current_file}")
-                
+
             except Exception as e:
                 logger.error(f"Recording failed: {e}")
                 self.current_file = None
@@ -234,73 +235,51 @@ class AudioFileManager:
                         stop_callback()
                     except Exception as e:
                         logger.error(f"Stop callback failed: {e}")
-        
+
         self._recording_thread = Thread(target=record_worker, daemon=True, name="AudioRecord")
         self._recording_thread.start()
-        
+
         return True
 
-    def record_audio_threaded(self, button_id: Union[str, int], 
-                           stop_callback: Optional[Callable] = None) -> Thread:
-        """
-        Start recording in a separate thread and return the thread object.
-        
-        Args:
-            button_id: ID of the button/slot for this recording
-            stop_callback: Optional callback to call when recording completes
-            
-        Returns:
-            Thread: The recording thread object
-        """
-        if self.is_recording:
-            logger.warning("Recording already in progress")
-            return None
-        
-        # Start recording using the start_recording method
-        self.start_recording(button_id, stop_callback)
-        
-        # Return the thread
-        return self._recording_thread
-        
     def stop_recording(self) -> bool:
         """
         Stop the current recording.
-        
+
         Returns:
             bool: True if recording was stopped, False if no recording was active
         """
         if not self.is_recording:
             logger.warning("No recording in progress to stop")
             return False
-            
+
         if hasattr(self, '_stop_event') and self._stop_event:
             self._stop_event.set()
-            
+
         self._exit_flag = True
-        
+
         # Wait for recording thread to complete
         if hasattr(self, '_recording_thread') and self._recording_thread:
             self._recording_thread.join(timeout=5.0)
             if self._recording_thread.is_alive():
                 logger.warning("Recording thread did not stop within timeout")
                 return False
-        
+
         logger.info("Recording stopped successfully")
         return True
-    
+
     def is_recording_active(self) -> bool:
         """
         Check if a recording is currently active.
-        
+
         Returns:
             bool: True if recording is active, False otherwise
         """
         return self.is_recording
-    
+
     def get_current_recording_info(self) -> Optional[Dict[str, Any]]:
         """
         Get information about the current recording in progress.
-        
+
         Returns:
             dict or None: Recording info if available, None if no recording
         """
@@ -311,23 +290,23 @@ class AudioFileManager:
     def play_audio(self, file_path_or_button_id: Union[str, Path, int]) -> bool:
         """
         Plays the audio for the given button_id or from the specified file path.
-        
+
         This method provides two ways to play audio:
         1. By button_id: Pass the button ID as a string or integer, and the method will look up
            the associated audio file in the metadata and play it.
         2. By file path: Pass a file path (string or Path object), and the method will play
            the audio file directly.
-        
+
         Args:
             file_path_or_button_id: Either a button_id or a file path to play
-            
+
         Returns:
             bool: True if playback was successful, False otherwise
-            
+
         Examples:
             # Play by button ID
             manager.play_audio("button1")
-            
+
             # Play by file path
             manager.play_audio("/path/to/audio.wav")
         """
@@ -335,11 +314,11 @@ class AudioFileManager:
         if isinstance(file_path_or_button_id, (str, int)) and not os.path.exists(str(file_path_or_button_id)):
             button_id = str(file_path_or_button_id)
             button_info = self.get_recording_info(button_id)
-            
+
             if not button_info:
                 logger.error(f"Cannot play audio: no recording found for button {button_id}")
                 return False
-                
+
             file_path = button_info.get("path")
             if not file_path:
                 logger.error(f"Cannot play audio: no file path in metadata for button {button_id}")
@@ -347,7 +326,7 @@ class AudioFileManager:
         else:
             # Input is a file path
             file_path = file_path_or_button_id
-            
+
         path = Path(file_path)
         if not path.exists():
             logger.error(f"Cannot play audio: file not found at {path}")
@@ -374,21 +353,21 @@ class AudioFileManager:
         Enhanced with format conversion support.
         """
         button_id = str(temp_path_info["button_id"])
-        if self.metadata.get(button_id, {}).get('read_only'):
+        if self.metadata.get(button_id, { }).get('read_only'):
             logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
             return
 
         temp_path = Path(temp_path_info["temp_path"])
         message_type = temp_path_info["message_type"]
-        
+
         # Generate final filename
         if self.audio_format in ['alaw', 'ulaw']:
             final_name = temp_path.stem + f"_{self.audio_format}.wav"
         else:
             final_name = temp_path.name
-            
+
         final_path = self.storage_dir / final_name
-        
+
         # Convert audio format if needed
         if self.audio_format in ['alaw', 'ulaw']:
             success = self._convert_audio_format(temp_path, final_path, self.audio_format)
@@ -397,7 +376,7 @@ class AudioFileManager:
                 shutil.move(temp_path, final_path)
         else:
             shutil.move(temp_path, final_path)
-        
+
         logger.info(f"Finalized recording for button '{button_id}' to {final_path}")
 
         # Update occupied sets for legacy compatibility
@@ -408,16 +387,16 @@ class AudioFileManager:
 
         # Update metadata
         self.metadata[button_id] = {
-            "name": final_path.name,
-            "duration": temp_path_info["duration"],
-            "path": str(final_path),
-            "timestamp": temp_path_info["timestamp"],
+            "name":         final_path.name,
+            "duration":     temp_path_info["duration"],
+            "path":         str(final_path),
+            "timestamp":    temp_path_info["timestamp"],
             "message_type": message_type,
             "audio_format": self.audio_format,
-            "sample_rate": temp_path_info.get("sample_rate", self.sample_rate),
-            "channels": temp_path_info.get("channels", self.channels),
-            "read_only": False,
-            "is_default": False
+            "sample_rate":  temp_path_info.get("sample_rate", self.sample_rate),
+            "channels":     temp_path_info.get("channels", self.channels),
+            "read_only":    False,
+            "is_default":   False
         }
         self._save_metadata()
 
@@ -459,12 +438,7 @@ class AudioFileManager:
     def cleanup(self) -> None:
         """Cleanup resources and stop any running operations."""
         self._exit_flag = True
-        
-        # Stop any ongoing recording
-        if self.is_recording:
-            self.stop_recording()
-            
-        if hasattr(self, '_recording_thread') and self._recording_thread and self._recording_thread.is_alive():
+        if self._recording_thread and self._recording_thread.is_alive():
             self._recording_thread.join(timeout=1.0)
         self._temp_dir_obj.cleanup()
 
@@ -509,14 +483,14 @@ class AudioFileManager:
             logger.warning(f"Could not read duration from {default_path}. Duration set to None.")
 
         self.metadata[button_id] = {
-            "name": default_name,
-            "duration": duration,
-            "path": str(default_path),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "name":         default_name,
+            "duration":     duration,
+            "path":         str(default_path),
+            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "message_type": "default",
             "audio_format": "wav",
-            "read_only": True,
-            "is_default": True
+            "read_only":    True,
+            "is_default":   True
         }
         self._save_metadata()
 
@@ -539,14 +513,14 @@ class AudioFileManager:
             logger.warning(f"Could not read duration from restored file {restored_path}. Duration set to None.")
 
         self.metadata[button_id] = {
-            "name": restored_path.name,
-            "duration": duration,
-            "path": str(restored_path),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "name":         restored_path.name,
+            "duration":     duration,
+            "path":         str(restored_path),
+            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "message_type": "restored_default",
             "audio_format": "wav",
-            "read_only": False,
-            "is_default": False
+            "read_only":    False,
+            "is_default":   False
         }
         self._save_metadata()
 
@@ -563,3 +537,4 @@ class AudioFileManager:
     def create_timestamp() -> str:
         """Create a timestamp string. Legacy compatibility method."""
         return str(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
