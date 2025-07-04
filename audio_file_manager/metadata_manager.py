@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 class MetadataManager:
     """Handles loading, saving, and querying audio file metadata."""
 
+    import threading
+
     def __init__(self, metadata_file: Path):
         """
         Initialize the MetadataManager.
@@ -21,6 +23,7 @@ class MetadataManager:
             metadata_file: Path to the metadata JSON file.
         """
         self.metadata_file = metadata_file
+        self._lock = self.threading.RLock()
         self.metadata: Dict[str, Dict[str, Any]] = self._load()
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
@@ -37,10 +40,11 @@ class MetadataManager:
 
     def save(self):
         """Save the current metadata to the JSON file."""
-        self.metadata_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.metadata_file, 'w') as f:
-            logger.debug(f"Saving metadata to {self.metadata_file}")
-            json.dump(self.metadata, f, indent=4)
+        with self._lock:
+            self.metadata_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.metadata_file, 'w') as f:
+                logger.debug(f"Saving metadata to {self.metadata_file}")
+                json.dump(self.metadata, f, indent=4)
 
     def get(self, button_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -52,7 +56,8 @@ class MetadataManager:
         Returns:
             A dictionary containing the recording's metadata, or None if not found.
         """
-        return self.metadata.get(button_id)
+        with self._lock:
+            return self.metadata.get(button_id)
 
     def get_all(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -61,7 +66,8 @@ class MetadataManager:
         Returns:
             A dictionary containing metadata for all recordings.
         """
-        return self.metadata
+        with self._lock:
+            return dict(self.metadata)
 
     def update_recording(self, button_id: str, data: Dict[str, Any]):
         """
@@ -71,8 +77,9 @@ class MetadataManager:
             button_id: The ID of the button associated with the recording.
             data: A dictionary containing the metadata to save.
         """
-        self.metadata[button_id] = data
-        self.save()
+        with self._lock:
+            self.metadata[button_id] = data
+            self.save()
 
     def set_read_only(self, button_id: str, read_only: bool):
         """
@@ -82,9 +89,10 @@ class MetadataManager:
             button_id: The ID of the button associated with the recording.
             read_only: True to make the recording read-only, False otherwise.
         """
-        if button_id in self.metadata:
-            self.metadata[button_id]['read_only'] = read_only
-            self.save()
+        with self._lock:
+            if button_id in self.metadata:
+                self.metadata[button_id]['read_only'] = read_only
+                self.save()
 
     def get_occupied_sets(self) -> Tuple[Set[str], Set[str]]:
         """
@@ -93,15 +101,16 @@ class MetadataManager:
         Returns:
             A tuple containing two sets: (occupied_away_messages, occupied_custom_messages)
         """
-        occupied_away = set()
-        occupied_custom = set()
-        for button_id, meta in self.metadata.items():
-            message_type = meta.get('message_type', '')
-            if message_type == 'away_message':
-                occupied_away.add(button_id)
-            elif message_type == 'custom_message':
-                occupied_custom.add(button_id)
-        return occupied_away, occupied_custom
+        with self._lock:
+            occupied_away = set()
+            occupied_custom = set()
+            for button_id, meta in self.metadata.items():
+                message_type = meta.get('message_type', '')
+                if message_type == 'away_message':
+                    occupied_away.add(button_id)
+                elif message_type == 'custom_message':
+                    occupied_custom.add(button_id)
+            return occupied_away, occupied_custom
 
     def get_messages_by_type(self, message_type: str) -> Dict[str, Dict[str, Any]]:
         """
@@ -113,10 +122,11 @@ class MetadataManager:
         Returns:
             A dictionary of messages filtered by type.
         """
-        return {
-            button_id: meta for button_id, meta in self.metadata.items()
-            if meta.get('message_type') == message_type
-        }
+        with self._lock:
+            return {
+                button_id: meta for button_id, meta in self.metadata.items()
+                if meta.get('message_type') == message_type
+            }
 
     def get_newest_message_of_type(self, message_type: str) -> Optional[Dict[str, Any]]:
         """

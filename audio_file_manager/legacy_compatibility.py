@@ -34,7 +34,7 @@ def add_legacy_compatibility(cls):
         self._played_once = value
     
     # Add methods for legacy compatibility
-    def get_message(self, audio_file_type: str = "", audio_file_id: str = "") -> str:
+    def get_message(self, audio_file_type="", audio_file_id=""):
         """
         Legacy compatibility method to get a message file path.
         
@@ -45,21 +45,33 @@ def add_legacy_compatibility(cls):
         Returns:
             str: Path to the message file, or "No file found" if not found
         """
-        file_path = "No file found"
+        # If audio_file_id is provided, use it directly
         if audio_file_id:
-            # Get specific message by ID
-            message_info = self.metadata_manager.get(audio_file_id)
-            if message_info and message_info.get("message_type") == audio_file_type:
-                file_path = message_info.get("path", "No file found")
+            button_id = str(audio_file_id)
+            # Check if this button exists in metadata
+            if button_id in self.metadata:
+                return self.metadata[button_id]["path"]
         else:
-            # Get the newest message of the given type
-            newest_message = self.metadata_manager.get_newest_message_of_type(audio_file_type)
-            if newest_message:
-                file_path = newest_message.get("path", "No file found")
+            # Find the newest message of the given type
+            newest_timestamp = 0
+            newest_button = None
+            
+            for button_id, info in self.metadata.items():
+                if info.get("message_type") == audio_file_type:
+                    try:
+                        timestamp = datetime.strptime(info["timestamp"], "%Y-%m-%d %H:%M:%S")
+                        epoch_time = (timestamp - datetime(1970, 1, 1)).total_seconds()
+                        
+                        if epoch_time > newest_timestamp:
+                            newest_timestamp = epoch_time
+                            newest_button = button_id
+                    except Exception as e:
+                        logger.warning(f"Error processing timestamp for button {button_id}: {e}")
+            
+            if newest_button:
+                return self.metadata[newest_button]["path"]
         
-        if file_path == "No file found":
-            logger.warning(f"No file found for type: {audio_file_type}, ID: {audio_file_id}")
-        return file_path
+        return "No file found"
     
     def exit(self):
         """Legacy compatibility method to stop recording and clean up."""

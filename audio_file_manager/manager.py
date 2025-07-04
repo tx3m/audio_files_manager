@@ -1,10 +1,12 @@
 import logging
 import time
 import wave
+import shutil
 from pathlib import Path
 from datetime import datetime
 from threading import Event, Thread
 from typing import Any, Dict, Optional, Union, Callable, Set
+import threading
 
 from .backends import get_audio_backend, AudioBackend
 from .metadata_manager import MetadataManager
@@ -53,16 +55,31 @@ class AudioFileManager:
 
         self.audio_backend: AudioBackend = get_audio_backend(input_device, output_device)
 
+        # Legacy compatibility - occupied message tracking
+        self.occupied_away_messages: Set[str] = set()
+        self.occupied_custom_messages: Set[str] = set()
+        self._load_occupied_sets()
+
         # Threading and state
         self._recording_thread: Optional[Thread] = None
         self._sound_level_callback: Optional[Callable] = None
         self.current_file: Dict[str, Any] = {}
         self.is_recording = False
+        self._finalize_lock = threading.RLock()
 
         logger.info(
             f"AudioFileManager initialized. Storage: {self.fs_manager.get_storage_dir()}, "
             f"Backend: {type(self.audio_backend).__name__}"
         )
+
+    def _load_occupied_sets(self):
+        """Load occupied message IDs from metadata for legacy compatibility."""
+        for button_id, meta in self.metadata_manager.metadata.items():
+            message_type = meta.get('message_type', '')
+            if message_type == 'away_message':
+                self.occupied_away_messages.add(button_id)
+            elif message_type == 'custom_message':
+                self.occupied_custom_messages.add(button_id)
 
     def set_sound_level_callback(self, callback: Callable[[int], None]):
         """
@@ -266,44 +283,37 @@ class AudioFileManager:
             return False
 
     def finalize_recording(self, temp_path_info: Dict[str, Any]):
-        """
-        Finalize a recording by moving it to permanent storage and updating metadata.
+        with self._finalize_lock:
+            button_id = str(temp_path_info["button_id"])
+            if self.metadata_manager.get(button_id) and self.metadata_manager.get(button_id).get('read_only'):
+                logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
+                return
 
-        Args:
-            temp_path_info: A dictionary containing information about the temporary file.
-        """
-        button_id = str(temp_path_info["button_id"])
-        if self.metadata_manager.get(button_id) and self.metadata_manager.get(button_id).get('read_only'):
-            logger.warning(f"Finalizing recording blocked: Button {button_id} is read-only.")
-            return
+            temp_path = Path(temp_path_info["temp_path"])
+            final_name = temp_path.name
+            final_path = self.fs_manager.get_storage_dir() / final_name
 
-        temp_path = Path(temp_path_info["temp_path"])
-        final_name = temp_path.name
-        final_path = self.fs_manager.get_storage_dir() / final_name
-
-        if self.config.audio_format in ['alaw', 'ulaw']:
-            converted_name = temp_path.stem + f"_{self.config.audio_format}.wav"
-            converted_path = self.fs_manager.get_storage_dir() / converted_name
-            if self.fs_manager.convert_audio_format(temp_path, converted_path, self.config.audio_format,
-                                                   temp_path_info["sample_rate"], temp_path_info["channels"]):
-                final_path = converted_path
+            if self.config.audio_format in ['alaw', 'ulaw']:
+                converted_name = temp_path.stem + f"_{self.config.audio_format}.wav"
+                converted_path = self.fs_manager.get_storage_dir() / converted_name
+                if self.fs_manager.convert_audio_format(temp_path, converted_path, self.config.audio_format,
+                                                       temp_path_info["sample_rate"], temp_path_info["channels"]):
+                    final_path = converted_path
+                else:
+                    logger.error("Audio conversion failed, using original format")
+                    self.fs_manager.move_to_storage(temp_path, final_name)
             else:
-                logger.error("Audio conversion failed, using original format")
                 self.fs_manager.move_to_storage(temp_path, final_name)
-        else:
-            self.fs_manager.move_to_storage(temp_path, final_name)
 
-        logger.info(f"Finalized recording for button '{button_id}' to {final_path}")
+            logger.info(f"Finalized recording for button '{button_id}' to {final_path}")
 
-        
-
-        self.metadata_manager.update_recording(button_id, {
-            "name": final_path.name, "duration": temp_path_info["duration"],
-            "path": str(final_path), "timestamp": temp_path_info["timestamp"],
-            "message_type": temp_path_info["message_type"], "audio_format": self.config.audio_format,
-            "sample_rate": temp_path_info["sample_rate"], "channels": temp_path_info["channels"],
-            "read_only": False, "is_default": False
-        })
+            self.metadata_manager.update_recording(button_id, {
+                "name": final_path.name, "duration": temp_path_info["duration"],
+                "path": str(final_path), "timestamp": temp_path_info["timestamp"],
+                "message_type": temp_path_info["message_type"], "audio_format": self.config.audio_format,
+                "sample_rate": temp_path_info["sample_rate"], "channels": temp_path_info["channels"],
+                "read_only": False, "is_default": False
+            })
 
     def cleanup(self):
         """Clean up resources and stop any running operations."""
@@ -352,6 +362,100 @@ class AudioFileManager:
             A dictionary containing metadata for all recordings.
         """
         return self.metadata_manager.get_all()
+
+    def assign_default(self, button_id: Union[str, int], source_path: Path):
+        """
+        Assigns a given audio file as a default message for a button.
+        The file is copied to the storage directory and marked as read-only.
+
+        Args:
+            button_id: The ID of the button to assign the default message to.
+            source_path: The path to the source audio file.
+        """
+        button_id = str(button_id)
+        if not source_path.exists():
+            logger.error(f"Cannot assign default: source file not found at {source_path}")
+            return
+
+        # Determine the target filename and path
+        # Use a consistent naming convention for default files
+        default_name = f"default_{button_id}.wav"
+        final_path = self.fs_manager.get_storage_dir() / default_name
+
+        # Copy the file to the storage directory
+        try:
+            self.fs_manager.move_to_storage(source_path, default_name)
+        except shutil.Error as e:
+            logger.error(f"Error copying default file {source_path} to {final_path}: {e}")
+            return
+
+        # Get audio info for metadata
+        try:
+            with wave.open(str(final_path), 'rb') as wf:
+                channels = wf.getnchannels()
+                sample_rate = wf.getframerate()
+                n_frames = wf.getnframes()
+                duration = n_frames / float(sample_rate)
+        except wave.Error as e:
+            logger.warning(f"Could not read WAV info from {final_path}: {e}. Setting default audio info.")
+            channels = self.config.channels
+            sample_rate = self.config.sample_rate
+            duration = 0.0
+
+        # Update metadata
+        self.metadata_manager.update_recording(button_id, {
+            "name": default_name,
+            "duration": round(duration, 2),
+            "path": str(final_path),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "message_type": "default",  # Mark as default message
+            "audio_format": "wav",  # Assuming WAV for default files
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "read_only": True,  # Default messages are read-only
+            "is_default": True
+        })
+        logger.info(f"Assigned default message for button '{button_id}' from {source_path} to {final_path}")
+
+    def restore_default(self, button_id: Union[str, int]):
+        """
+        Restores a default message for a given button, making it editable.
+        A new copy of the default file is created and its metadata updated.
+
+        Args:
+            button_id: The ID of the button whose default message to restore.
+        """
+        button_id = str(button_id)
+        default_info = self.metadata_manager.get(button_id)
+
+        if not default_info or not default_info.get("is_default"):
+            logger.warning(f"Cannot restore default for '{button_id}': default file not found or not marked as default.")
+            return
+
+        source_path = Path(default_info["path"])
+        if not source_path.exists():
+            logger.warning(f"Cannot restore default for '{button_id}': source file not found at {source_path}.")
+            return
+
+        # Create a new editable copy
+        new_filename = f"{button_id}_restored_{int(time.time())}.wav"
+        new_path = self.fs_manager.get_storage_dir() / new_filename
+        shutil.copy(source_path, new_path)
+
+        # Update metadata for the new editable copy
+        self.metadata_manager.update_recording(button_id, {
+            "name": new_filename,
+            "duration": default_info.get("duration"),
+            "path": str(new_path),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "message_type": "restored_default",  # New message type for restored defaults
+            "audio_format": default_info.get("audio_format"),
+            "sample_rate": default_info.get("sample_rate"),
+            "channels": default_info.get("channels"),
+            "read_only": False,  # Restored messages are editable
+            "is_default": False
+        })
+        logger.info(f"Restored default message for button '{button_id}' to {new_path}")
 
     def get_audio_device_info(self) -> Dict[str, Any]:
         """
