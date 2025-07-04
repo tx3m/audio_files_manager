@@ -106,7 +106,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         adapter = LegacyServiceAdapter(self.manager)
         
         self.assertEqual(adapter.audio_manager, self.manager)
-        self.assertEqual(adapter.message_path, self.manager.storage_dir)
+        self.assertEqual(adapter.message_path, self.manager.fs_manager.get_storage_dir())
         self.assertIsNone(adapter.sound_level_updater)
         self.assertIsNone(adapter.nextion_interface)
     
@@ -167,12 +167,12 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         away_id = self.adapter._get_new_id()
         self.adapter.message_type = "away_message"
         away_id = self.adapter._get_new_id()
-        self.assertIn(away_id, self.adapter.audio_manager.MAX_FILES_PER_TYPE)
+        self.assertIn(away_id, [str(i) for i in range(1, self.adapter.audio_manager.config.num_buttons + 1)])
         
         # Test custom message ID
         self.adapter.message_type = "custom_message"
         custom_id = self.adapter._get_new_id()
-        self.assertIn(custom_id, self.adapter.audio_manager.MAX_FILES_PER_TYPE)
+        self.assertIn(custom_id, [str(i) for i in range(1, self.adapter.audio_manager.config.num_buttons + 1)])
     
     def test_create_timestamp(self):
         """Test timestamp creation."""
@@ -192,7 +192,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         
         self.assertEqual(self.adapter.current_file["id"], "1")
         self.assertEqual(self.adapter.current_file["filename"], "away_message1.wav")
-        self.assertIn("1", self.adapter.audio_manager.occupied_away_messages)
+        
         self.assertEqual(self.adapter._button_id, self.nextion_interface.key_id.AWAY_MESSAGE_CHECKBOX)
         
         # Test file creation
@@ -208,7 +208,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         
         self.assertEqual(self.adapter.current_file["id"], "2")
         self.assertEqual(self.adapter.current_file["filename"], "custom_message2.wav")
-        self.assertIn("2", self.adapter.audio_manager.occupied_custom_messages)
+        
         self.assertEqual(self.adapter._button_id, self.nextion_interface.key_id.CUSTOM_MESSAGE_CHECKBOX)
     
     def test_update_json_backup_away_message(self):

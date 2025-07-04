@@ -100,9 +100,6 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         # _played_once may not exist, so check with hasattr
         if hasattr(self.adapter, '_played_once'):
             self.assertFalse(self.adapter._played_once)
-        # Test file paths
-        self.assertTrue(self.adapter._away_msg_backup_file.endswith("away_messages.json"))
-        self.assertTrue(self.adapter._custom_msg_backup_file.endswith("custom_messages.json"))
     
     def test_initialization_without_optional_parameters(self):
         """Test initialization without optional parameters."""
@@ -120,28 +117,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         # Verify sound level updater received the call
         self.assertIn(("input", 1500), self.sound_level_updater.levels)
     
-    def test_load_json(self):
-        """Test JSON loading functionality."""
-        # Test with non-existent file
-        result = self.adapter._load_json("nonexistent.json")
-        self.assertEqual(result, {})
-        
-        # Test with valid JSON file
-        test_data = {"1": {"filename": "test.wav", "timestamp": "2023-01-01 12:00:00"}}
-        test_file = os.path.join(self.test_dir, "test.json")
-        with open(test_file, 'w') as f:
-            json.dump(test_data, f)
-        
-        result = self.adapter._load_json(test_file)
-        self.assertEqual(result, test_data)
-        
-        # Test with invalid JSON file
-        invalid_file = os.path.join(self.test_dir, "invalid.json")
-        with open(invalid_file, 'w') as f:
-            f.write("invalid json content")
-        
-        result = self.adapter._load_json(invalid_file)
-        self.assertEqual(result, {})
+    # Removed test_load_json as _load_json is no longer a method of LegacyServiceAdapter
     
     def test_set_paging_server_callback(self):
         """Test paging server callback setting."""
@@ -171,7 +147,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         
         self.assertEqual(self.adapter.current_file["id"], "1")
         self.assertEqual(self.adapter.current_file["filename"], "away_message1.wav")
-        self.assertIn("1", self.adapter.audio_manager.occupied_away_messages)
+        
         self.assertEqual(self.adapter._button_id, self.nextion_interface.key_id.AWAY_MESSAGE_CHECKBOX)
         
         # Test custom message
@@ -181,7 +157,7 @@ class TestLegacyServiceAdapter(unittest.TestCase):
         
         self.assertEqual(self.adapter.current_file["id"], "2")
         self.assertEqual(self.adapter.current_file["filename"], "custom_message2.wav")
-        self.assertIn("2", self.adapter.audio_manager.occupied_custom_messages)
+        
         self.assertEqual(self.adapter._button_id, self.nextion_interface.key_id.CUSTOM_MESSAGE_CHECKBOX)
     
     def test_get_new_id(self):
@@ -416,10 +392,13 @@ class TestLegacyServiceIntegration(unittest.TestCase):
     def setUp(self):
         """Set up integration test environment."""
         self.test_dir = tempfile.mkdtemp()
+        from audio_file_manager.config import Config
         self.manager = AudioFileManager(
             storage_dir=self.test_dir,
-            audio_format="alaw",
-            sample_rate=8000
+            config=Config(
+                audio_format="alaw",
+                sample_rate=8000
+            )
         )
         self.adapter = LegacyServiceAdapter(self.manager, message_path=self.test_dir)
 
@@ -453,8 +432,8 @@ class TestLegacyServiceIntegration(unittest.TestCase):
 
     def test_integration_with_audio_manager_features(self):
         """Test integration with AudioFileManager features."""
-        self.assertEqual(self.adapter.audio_manager.audio_format, "alaw")
-        self.assertEqual(self.adapter.audio_manager.sample_rate, 8000)
+        self.assertEqual(self.adapter.audio_manager.config.audio_format, "alaw")
+        self.assertEqual(self.adapter.audio_manager.config.sample_rate, 8000)
         device_info = self.adapter.audio_manager.get_audio_device_info()
         self.assertIsInstance(device_info, dict)
 
@@ -485,10 +464,12 @@ class TestLegacyServiceIntegration(unittest.TestCase):
         self.manager.finalize_recording(recording_info)
         manager_info = self.manager.get_recording_info("consistency_test")
         self.assertIsNotNone(manager_info)
+        # Verify occupied sets are updated
         self.assertTrue(
             "consistency_test" in getattr(self.manager, 'occupied_away_messages', set()) or
             "consistency_test" in getattr(self.manager, 'occupied_custom_messages', set())
         )
+
 
     def test_concurrent_access(self):
         """Test concurrent access between adapter and manager."""

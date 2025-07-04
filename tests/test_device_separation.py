@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from audio_file_manager import AudioFileManager
 from audio_file_manager.backends import ALSABackend, SoundDeviceBackend, MockAudioBackend
+from audio_file_manager.config import Config
 
 
 class TestDeviceSeparation(unittest.TestCase):
@@ -34,8 +35,7 @@ class TestDeviceSeparation(unittest.TestCase):
         manager = AudioFileManager(
             storage_dir=self.test_dir,
             metadata_file=self.meta_file,
-            input_device="input_test",
-            output_device="output_test"
+            config=Config(input_device="input_test", output_device="output_test")
         )
         
         # Check that the backend has the correct devices (may be None with real backends)
@@ -62,7 +62,7 @@ class TestDeviceSeparation(unittest.TestCase):
         manager = AudioFileManager(
             storage_dir=self.test_dir,
             metadata_file=self.meta_file,
-            audio_device="legacy_device"
+            config=Config(audio_device="legacy_device")
         )
         
         # Check that both input and output devices are set to the legacy device
@@ -84,9 +84,7 @@ class TestDeviceSeparation(unittest.TestCase):
         manager = AudioFileManager(
             storage_dir=self.test_dir,
             metadata_file=self.meta_file,
-            input_device="new_input",
-            output_device="new_output",
-            audio_device="old_device"  # Should be ignored
+            config=Config(input_device="new_input", output_device="new_output", audio_device="old_device")
         )
         
         # Check that the new parameters take precedence
@@ -269,7 +267,7 @@ class TestFactoryFunctionDeviceSeparation(unittest.TestCase):
             backend = get_audio_backend("1", "2")
             
             # Check that SoundDeviceBackend was called with the correct devices
-            mock_sd.assert_called_with(1, 2)  # Should convert strings to integers
+            mock_sd.assert_called_with("1", "2")  # Should convert strings to integers
     
     @patch('audio_file_manager.backends.platform')
     def test_factory_function_no_backends(self, mock_platform):

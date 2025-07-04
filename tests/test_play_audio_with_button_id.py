@@ -33,7 +33,7 @@ class TestPlayAudioWithButtonId(unittest.TestCase):
         
         # Add a test recording to metadata
         self.button_id = "1"
-        self.manager.metadata[self.button_id] = {
+        self.manager.metadata_manager.metadata[self.button_id] = {
             "name": "test_recording.wav",
             "duration": 1.0,
             "path": str(self.test_audio_path),
@@ -43,7 +43,7 @@ class TestPlayAudioWithButtonId(unittest.TestCase):
             "read_only": False,
             "is_default": False
         }
-        self.manager._save_metadata()
+        self.manager.metadata_manager.save()
 
     def tearDown(self):
         # Clean up temporary directory

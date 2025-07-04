@@ -19,12 +19,14 @@ class TestEnhancedInteractiveAudioTester(unittest.TestCase):
         # Patch the AudioFileManager to use our test directory
         with patch('enhanced_record_example.AudioFileManager') as mock_manager_class:
             mock_manager = Mock()
-            mock_manager.storage_dir = Path(self.test_dir)
+            mock_manager.fs_manager.get_storage_dir.return_value = Path(self.test_dir)
+            # mock_manager.storage_dir = Path(self.test_dir)
             mock_manager.audio_backend.__class__.__name__ = "MockAudioBackend"
             mock_manager.get_audio_device_info.return_value = {"device": "test", "backend": "Mock"}
-            mock_manager.audio_format = "pcm"
-            mock_manager.sample_rate = 44100
-            mock_manager.channels = 1
+            mock_manager.config = Mock()
+            mock_manager.config.audio_format = "pcm"
+            mock_manager.config.sample_rate = 44100
+            mock_manager.config.channels = 1
             mock_manager_class.return_value = mock_manager
             
             self.tester = EnhancedInteractiveAudioTester()
@@ -116,7 +118,7 @@ class TestEnhancedInteractiveAudioTester(unittest.TestCase):
         with patch('builtins.input', return_value='alaw'):
             self.tester._handle_format()
             
-            self.assertEqual(self.tester.manager.audio_format, 'alaw')
+            self.assertEqual(self.tester.manager.config.audio_format, 'alaw')
         
         # Test invalid format
         with patch('builtins.input', return_value='invalid_format'):
@@ -136,7 +138,7 @@ class TestEnhancedInteractiveAudioTester(unittest.TestCase):
         with patch('builtins.input', return_value='8000'):
             self.tester._handle_rate()
             
-            self.assertEqual(self.tester.manager.sample_rate, 8000)
+            self.assertEqual(self.tester.manager.config.sample_rate, 8000)
         
         # Test invalid rate
         with patch('builtins.input', return_value='invalid_rate'):
