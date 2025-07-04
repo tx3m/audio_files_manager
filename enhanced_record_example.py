@@ -356,7 +356,7 @@ class EnhancedInteractiveAudioTester:
         new_readonly = not current_readonly
         self.manager.set_read_only(self.current_button, new_readonly)
         print(f"Button '{self.current_button}' read-only: {new_readonly}")
-    
+
     def _handle_default(self):
         """Set a default recording."""
         file_path = input("Enter path to default audio file: ").strip()
@@ -364,19 +364,7 @@ class EnhancedInteractiveAudioTester:
             return
         
         try:
-            # Copy the file to storage and mark as default
-            from shutil import copy2
-            dest_path = self.manager.fs_manager.get_storage_dir() / f"default_{self.current_button}.wav"
-            copy2(file_path, dest_path)
-            
-            # Update metadata to mark as default
-            self.manager.metadata_manager.update_recording(self.current_button, {
-                "name": dest_path.name,
-                "path": str(dest_path),
-                "is_default": True,
-                "message_type": self.current_message_type,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-            })
+            self.manager.assign_default(self.current_button, file_path)
             print(f"Default recording set for button '{self.current_button}'")
         except Exception as e:
             self.log.error(f"Failed to set default: {e}")
@@ -384,11 +372,8 @@ class EnhancedInteractiveAudioTester:
     def _handle_restore(self):
         """Restore default recording."""
         try:
-            info = self.manager.get_recording_info(self.current_button)
-            if info and info.get('is_default'):
-                print(f"Button '{self.current_button}' already has default recording")
-            else:
-                print(f"No default recording available for button '{self.current_button}'")
+            self.manager.restore_default(self.current_button)
+            print(f"Default recording restored for button '{self.current_button}'")
         except Exception as e:
             self.log.error(f"Failed to restore default: {e}")
     
