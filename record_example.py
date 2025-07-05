@@ -11,7 +11,12 @@ class InteractiveAudioTester:
     """
     def __init__(self):
         self.log = logging.getLogger("RecordExample")
-        self.manager = AudioFileManager()
+        # Initialize with default devices (will use system defaults)
+        self.manager = AudioFileManager(
+            # You can specify separate input and output devices if needed:
+            # input_device="default",  # For recording
+            # output_device="default"  # For playback
+        )
 
         # --- State Variables ---
         self.recording_thread: Optional[threading.Thread] = None
