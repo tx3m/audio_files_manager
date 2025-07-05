@@ -21,6 +21,7 @@ extras_require = {
         'pytest-cov>=2.10.0',
         'black>=21.0.0',
         'flake8>=3.8.0',
+        'coverage>=5.0.0',
     ],
     'legacy': [
         # Dependencies for legacy service integration
